@@ -3,13 +3,14 @@
 
 import argparse
 from datetime import datetime
-import fcntl
 import ipaddress
 import os
 from pathlib import Path
 import plistlib
 import re
 import shutil
+import tempfile
+from src.policy import locked
 import sys
 import subprocess
 
@@ -21,8 +22,7 @@ def install(expected_ip=None):
     bindir = app.HOME / ".local/bin"
     bindir.mkdir(parents=True, exist_ok=True)
     app.ensure_dirs()
-    with app.LOCK.open("a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with locked(app.LOCK):
         backup = app.BASE / "backups" / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         backup.mkdir(parents=True, mode=0o700)
         for path in (bindir / "claude-w", bindir / "claude-window", bindir / "ckill",
@@ -44,16 +44,15 @@ def install(expected_ip=None):
             app.write_json(manifest, {"backup": str(backup), "new_plist": not app.PLIST.exists()})
         app.migrate_history()
         source.chmod(0o755)
-        for name, target in (("claude-w", source), ("claude-window", "claude-w")):
-            path = bindir / name
-            temp = path.with_name(f".{name}.{os.getpid()}.tmp")
-            temp.symlink_to(target)
-            temp.replace(path)
-        path = bindir / "ckill"
-        temp = path.with_name(f".ckill.{os.getpid()}.tmp")
-        temp.write_text('#!/bin/sh\n# ClaudeGuard compatibility\nexec "$HOME/.local/bin/claude-w" kill "$@"\n')
-        temp.chmod(0o755)
-        temp.replace(path)
+        with tempfile.TemporaryDirectory(prefix=".claudeguard-", dir=bindir) as staging:
+            for name, target in (("claude-w", source), ("claude-window", "claude-w")):
+                temp = Path(staging) / name
+                temp.symlink_to(target)
+                temp.replace(bindir / name)
+            temp = Path(staging) / "ckill"
+            temp.write_text('#!/bin/sh\n# ClaudeGuard compatibility\nexec "$HOME/.local/bin/claude-w" kill "$@"\n')
+            temp.chmod(0o755)
+            temp.replace(bindir / "ckill")
         if not app.PLIST.exists():
             config = {
                 "Label": app.LABEL,
@@ -76,40 +75,48 @@ def install(expected_ip=None):
 
 
 def uninstall():
-    """Restore only compatibility entrypoints owned by this installation."""
+    """Restore only owned entrypoints, with the same lock as a running request."""
     manifest = app.BASE / "claudeguard-install.json"
-    record = app.read_json(manifest)
-    if not record:
+    if not manifest.exists():
         return
-    backup = Path(record["backup"])
-    backup.resolve().relative_to((app.BASE / "backups").resolve())
-    source = Path(__file__).resolve().parents[1] / "bin/claude-w"
-    bindir = app.HOME / ".local/bin"
-    current = bindir / "claude-w"
-    ours = current.is_symlink() and current.resolve() == source.resolve()
-    if ours:
-        subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{app.LABEL}"], capture_output=True)
-    for name in ("claude-w", "claude-window", "ckill"):
-        path = bindir / name
-        owned = (path.is_symlink() and path.resolve() == source.resolve())
-        if name == "ckill" and path.is_file() and not path.is_symlink():
-            owned = "# ClaudeGuard compatibility" in path.read_text()
-        if not owned:
-            continue
-        old = backup / name
-        if old.is_symlink():
-            temp = path.with_name(f".{name}.restore")
-            temp.symlink_to(os.readlink(old))
-            temp.replace(path)
-        elif old.exists():
-            temp = path.with_name(f".{name}.restore")
-            shutil.copy2(old, temp)
-            temp.replace(path)
-        else:
-            path.unlink()
-    if ours and record.get("new_plist") and app.PLIST.exists():
-        app.PLIST.unlink()
-    manifest.unlink()
+    with locked(app.LOCK):
+        record = app.read_json(manifest)
+        if not record:
+            raise ValueError("窗口安装记录无效，未执行卸载")
+        backup = Path(record["backup"])
+        backup.resolve().relative_to((app.BASE / "backups").resolve())
+        if not backup.is_dir():
+            raise ValueError("窗口命令备份丢失，未执行卸载")
+        source = Path(__file__).resolve().parents[1] / "bin/claude-w"
+        bindir = app.HOME / ".local/bin"
+        owned = {}
+        # Resolve every alias before replacing its target.
+        for name in ("claude-w", "claude-window", "ckill"):
+            path = bindir / name
+            owned[name] = path.is_symlink() and path.resolve() == source.resolve()
+            if name == "ckill" and path.is_file() and not path.is_symlink():
+                owned[name] = path.read_text() == '#!/bin/sh\n# ClaudeGuard compatibility\nexec "$HOME/.local/bin/claude-w" kill "$@"\n'
+        if owned['claude-w']:
+            subprocess.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{app.LABEL}"], capture_output=True, timeout=10)
+        with tempfile.TemporaryDirectory(prefix=".claudeguard-restore-", dir=bindir) as staging:
+            for name, ours in owned.items():
+                if not ours:
+                    continue
+                old, path = backup / name, bindir / name
+                temporary = Path(staging) / name
+                if old.is_symlink():
+                    temporary.symlink_to(os.readlink(old))
+                    temporary.replace(path)
+                elif old.is_file():
+                    shutil.copy2(old, temporary)
+                    temporary.replace(path)
+                else:
+                    path.unlink()
+        if owned['claude-w'] and record.get("new_plist") and app.PLIST.exists():
+            value = plistlib.loads(app.PLIST.read_bytes())
+            if value.get('Label') == app.LABEL and str(bindir / 'claude-w') in value.get('ProgramArguments', []):
+                app.PLIST.unlink()
+        manifest.unlink()
 
 
 if __name__ == "__main__":

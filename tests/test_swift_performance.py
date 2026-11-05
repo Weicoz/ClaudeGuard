@@ -23,7 +23,7 @@ class SwiftPerformanceTests(unittest.TestCase):
                 headers.append(self.headers.get('Connection'))
                 if self.path == '/slow':
                     time.sleep(0.8)
-                body = b'invalid' if self.path == '/invalid' else b'203.0.113.10'
+                body = b'x' * 65536 if self.path == '/oversized' else (b'invalid' if self.path == '/invalid' else b'203.0.113.10')
                 self.send_response(503 if self.path == '/error' else 200)
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -71,6 +71,8 @@ precondition(native.preferredHTTPService == base + "/fallback")
 precondition(native.resolvePublicIP(deadline: 1, mode: "http") == "203.0.113.10")
 native.httpServices = [base + "/error", base + "/invalid"]
 precondition(native.resolvePublicIP(deadline: 0.4, mode: "http") == nil, "HTTP errors or malformed IPs allowed")
+native.httpServices = [base + "/oversized"]
+precondition(native.resolvePublicIP(deadline: 0.4, mode: "http") == nil, "Oversized provider response accepted")
 native.httpSession?.invalidateAndCancel()
 print("Native performance checks passed")
 '''
@@ -84,7 +86,7 @@ print("Native performance checks passed")
                 subprocess.run(['swiftc', '-O', str(main), '-o', str(executable)], check=True, capture_output=True, text=True, timeout=60)
                 result = subprocess.run([str(executable), f'http://127.0.0.1:{server.server_port}', str(Path(directory) / 'events.jsonl')], check=True, capture_output=True, text=True, timeout=10)
                 self.assertIn('Native performance checks passed', result.stdout)
-                self.assertEqual(counts, {'/good': 2, '/slow': 1, '/fallback': 2, '/error': 1, '/invalid': 1})
+                self.assertEqual(counts, {'/good': 2, '/slow': 1, '/fallback': 2, '/error': 1, '/invalid': 1, '/oversized': 1})
                 self.assertEqual(set(headers), {'close'})
             finally:
                 server.shutdown()

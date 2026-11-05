@@ -26,7 +26,7 @@ class BenchmarkGuard: AppDelegate {
         if exits.isEmpty { failedProbes += 1 } else { verifiedProbes += 1 }
         return exits
     }
-    override func apply(from previous: GuardState, to new: GuardState) {}
+    override func apply(from previous: GuardState, to new: GuardState) { enforcementConfirmed = true }
     override func setupAppLaunchInterceptor() {}
     override func runHelper(_ cmd: String, _ a1: String, _ a2: String) -> Process? {
         helperRequests += 1
@@ -59,13 +59,16 @@ func childrenCPU() -> Double {
 }
 var warmChildCPU = 0.0
 Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { _ in
-    warmPolicies = delegate.policyProcesses
-    warmHelpers = delegate.helperRequests
+    delegate.workQueue.sync {
+        warmPolicies = delegate.policyProcesses
+        warmHelpers = delegate.helperRequests
+    }
     warmChildCPU = childrenCPU()
 }
 signal(SIGTERM, SIG_IGN)
 let stop = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 stop.setEventHandler {
+    delegate.workQueue.sync {
     let counts: [String: Any] = ["policy_processes": delegate.policyProcesses, "helper_requests": delegate.helperRequests,
                   "child_cpu_seconds_after_warmup": childrenCPU() - warmChildCPU,
                   "verified_probes": delegate.verifiedProbes, "failed_probes": delegate.failedProbes,
@@ -73,6 +76,7 @@ stop.setEventHandler {
                   "helper_requests_after_warmup": delegate.helperRequests - warmHelpers]
     print(String(data: try! JSONSerialization.data(withJSONObject: counts), encoding: .utf8)!)
     exit(0)
+    }
 }
 stop.resume()
 Timer.scheduledTimer(withTimeInterval: Double(CommandLine.arguments[4])!, repeats: false) { _ in exit(2) }

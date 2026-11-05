@@ -71,13 +71,9 @@ def main():
         print(f"[ClaudeGuard] 已阻止启动：{exc}", file=sys.stderr)
         sys.exit(1)
 
-    if not config.protection_enabled:
-        run_real_claude(config)
-        return
-
     # Restore the terminal BEFORE printing: force_restore_terminal() flips the
     # screen buffer, so printing first would wipe the message we just wrote.
-    if not config.allowed_ips and config.config.get("access_mode", "whitelist") == "whitelist":
+    if config.protection_enabled and not config.allowed_ips and config.config.get("access_mode", "whitelist") == "whitelist":
         force_restore_terminal()
         print("\033[91m[ClaudeGuard] 🚫 尚未设置 IP 白名单，已阻止启动。\033[0m", file=sys.stderr)
         print("请运行 claudeguard add-ip <出口IP> 添加允许使用的出口。", file=sys.stderr)
@@ -100,7 +96,11 @@ def main():
     except Exception:
         pass
 
-    sync_hosts_file(block_claude_domains=False, block_update_domains=config.block_auto_updates, config=config)
+    ok, message = sync_hosts_file(block_claude_domains=False, block_update_domains=config.block_auto_updates, config=config)
+    if not ok:
+        force_restore_terminal()
+        print_block_banner(ip, message, "系统网络规则执行失败，已取消启动")
+        sys.exit(1)
     run_real_claude(config)
 
 def monitor_and_enforce(config, proc, stop_event, block_info):

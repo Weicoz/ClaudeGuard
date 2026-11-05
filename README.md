@@ -60,7 +60,7 @@ Two ways to install - both give the exact same result.
 **Option 1 - one line** (downloads and builds from GitHub):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Weicoz/ClaudeGuard/main/install.sh)"
 ```
 
 **Option 2 - from a local copy** (a cloned or downloaded repo; never touches GitHub):
@@ -69,7 +69,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/ma
 ./install.sh
 ```
 
-Either way it compiles for your architecture (Apple Silicon or Intel), installs the lightweight background daemon at login,
+Either way it compiles for Apple Silicon (arm64), installs the lightweight background daemon at login,
 and wraps the `claude` command. It asks for your password once (`sudo` is needed to edit `/etc/hosts` and pf)
 and offers to whitelist your current IP - accept **only if you are on your VPN right now.**
 

@@ -60,7 +60,7 @@ class ConfigManager:
                 # Fill missing default keys
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in data:
-                        data[k] = v
+                        data[k] = copy.deepcopy(v)
                 return data
         except Exception as e:
             print(f"[ClaudeGuard] 配置读取失败，将使用默认设置：{e}")
@@ -98,7 +98,7 @@ class ConfigManager:
 
     @property
     def protection_enabled(self):
-        return self.config.get("protection_enabled", True)
+        return self.config.get("protection_enabled", True) is not False
 
     @protection_enabled.setter
     def protection_enabled(self, val):

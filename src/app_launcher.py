@@ -13,11 +13,7 @@ from src.network_guard import sync_hosts_file
 def launch_claude_desktop():
     config = ConfigManager()
 
-    if not config.protection_enabled:
-        open_real_app(config)
-        return
-
-    if not config.allowed_ips and config.config.get("access_mode", "whitelist") == "whitelist":
+    if config.protection_enabled and not config.allowed_ips and config.config.get("access_mode", "whitelist") == "whitelist":
         show_mac_alert(
             "ClaudeGuard 已拦截",
             "尚未设置 IP 白名单，已阻止启动 Claude 桌面端。\n\n请运行 claudeguard add-ip <出口IP> 添加允许使用的出口。"
@@ -43,7 +39,10 @@ def launch_claude_desktop():
         sys.exit(1)
 
     # IP is valid! Unblock domain and start app
-    sync_hosts_file(block_claude_domains=False, block_update_domains=config.block_auto_updates, config=config)
+    ok, message = sync_hosts_file(block_claude_domains=False, block_update_domains=config.block_auto_updates, config=config)
+    if not ok:
+        show_mac_alert("ClaudeGuard 系统防护执行失败", message)
+        sys.exit(1)
     open_real_app(config)
 
 def open_real_app(config):
@@ -61,8 +60,8 @@ def open_real_app(config):
         show_mac_alert("ClaudeGuard 启动失败", "未找到 Claude 桌面端，请运行 claudeguard doctor 检查安装位置。")
 
 def show_mac_alert(title, message):
-    script = f'display alert "{title}" message "{message}" as critical buttons {{"知道了"}} default button "知道了"'
-    subprocess.run(["osascript", "-e", script], check=False)
+    script = 'on run argv\n display alert (item 1 of argv) message (item 2 of argv) as critical buttons {"知道了"} default button "知道了"\nend run'
+    subprocess.run(["/usr/bin/osascript", "-e", script, title, message], check=False)
 
 if __name__ == "__main__":
     launch_claude_desktop()

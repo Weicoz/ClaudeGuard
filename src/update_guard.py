@@ -19,12 +19,11 @@ def apply_auto_update_lock(block_updates):
         for path in targets:
             recursive = ["-R"] if os.path.isdir(path) else []
             if block_updates:
-                subprocess.run(["chmod"] + recursive + ["444", path], check=False)
-                subprocess.run(["chflags"] + recursive + ["uchg", path], check=False)
+                subprocess.run(["chmod"] + recursive + ["a-w", path], check=True, timeout=10)
+                subprocess.run(["chflags"] + recursive + ["uchg", path], check=True, timeout=10)
             else:
-                subprocess.run(["chflags"] + recursive + ["nouchg", path], check=False)
-                subprocess.run(["chmod"] + recursive + ["755" if os.path.isdir(path) else "644", path],
-                               check=False)
+                subprocess.run(["chflags"] + recursive + ["nouchg", path], check=True, timeout=10)
+                subprocess.run(["chmod"] + recursive + ["u+w", path], check=True, timeout=10)
 
         return True, f"已处理 {len(targets)} 处自动更新文件"
     except Exception as e:

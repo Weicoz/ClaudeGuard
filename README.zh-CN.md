@@ -8,7 +8,7 @@ ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护
 
 ## DMG 与 Claude-W
 
-macOS 预览版支持 Apple Silicon / Intel 通用 DMG，镜像内双击安装入口；当前未做 Apple 公证，需要可用的 `/usr/bin/python3`。构建及限制见 [macOS 发行说明](docs/release-macos.md)。
+macOS 预览版支持 Apple Silicon（arm64）DMG，镜像内双击安装入口；当前未做 Apple 公证，需要可用的 `/usr/bin/python3`。构建及限制见 [macOS 发行说明](docs/release-macos.md)。
 
 Claude-W 已完整集成：运行 `claudeguard window --help` 查看额度、历史、窗口计划和进程关闭功能，也可以从设置的“额度与窗口”进入。新安装的自动请求默认关闭，旧命令兼容保留；关闭进程统一调用 ClaudeGuard。详见 [Claude-W 集成](docs/claude-w.md)。
 
@@ -27,7 +27,7 @@ Claude-W 已完整集成：运行 `claudeguard window --help` 查看额度、历
 需要 macOS 和 Xcode 命令行工具。安装时会在本机编译程序，并请求管理员权限，用于注册负责域名和防火墙规则的系统网络助手。
 
 ```bash
-git clone https://github.com/keii-2596/ClaudeGuard.git
+git clone https://github.com/Weicoz/ClaudeGuard.git
 cd ClaudeGuard
 ./install.sh
 ```

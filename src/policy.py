@@ -26,6 +26,18 @@ DEFAULTS = {"access_mode": "whitelist", "risk_threshold": 50,
 
 def settings(data):
     result = {**DEFAULTS, **data}
+    for key in ('protection_enabled', 'block_auto_updates', 'model_override_enabled', 'network_guard_enabled'):
+        if key in result and type(result[key]) is not bool:
+            raise ValueError(f'{key} 必须是 true 或 false')
+    entries = result.get('allowed_ips', [])
+    if not isinstance(entries, list) or any(not isinstance(ip, str) for ip in entries):
+        raise ValueError('allowed_ips 必须是 IP 或 CIDR 网段列表')
+    for entry in entries:
+        if '%' in entry:
+            raise ValueError('公网白名单不得包含 IPv6 zone')
+        ipaddress.ip_network(entry, strict=False)
+    from src.proxy_config import validate_proxy
+    validate_proxy(result)
     if result['access_mode'] not in ('whitelist', 'risk'):
         raise ValueError('访问规则只能为 whitelist 或 risk')
     for field, low, high in [('risk_threshold', 0, 100), ('risk_cache_ttl', 1, 604800), ('check_interval', 1, 60)]:
@@ -46,7 +58,7 @@ def settings(data):
 def advanced(data):
     return (data.get('access_mode', 'whitelist') != 'whitelist'
             or data.get('detect_ip_change', False) is not False
-            or data.get('allow_unknown_ip', False) is True)
+            or data.get('allow_unknown_ip', False) is not False)
 
 
 def atomic_json(path, value):
@@ -149,6 +161,8 @@ def evaluate(data, ips, directory, acknowledge=False, expected_ips=None, now=Non
         if not data.get('protection_enabled', True):
             return {'state': 'disabled', 'ip': None, 'detected_ips': {}, 'reason': '防护已关闭', 'scores': {}, 'error': None}
         modes = ('http', 'stun') if data['ip_check_mode'] == 'both' else (data['ip_check_mode'],)
+        if any(not isinstance(ip, str) or '%' in ip for m, ip in ips.items() if m in modes):
+            raise ValueError('出口必须是不含 zone 的 IP 字面量')
         ips = {m: str(ipaddress.ip_address(ip)) for m, ip in ips.items() if m in modes}
         display = '; '.join(f'{m.upper()}: {ips.get(m, "未获取")}' for m in modes) if len(modes) > 1 else ips.get(modes[0])
         result = {'state': 'blocked', 'ip': display, 'detected_ips': ips, 'scores': {}, 'error': None, 'jump_latched': False}
@@ -254,12 +268,7 @@ def check(data, directory, acknowledge=False, expected_ips=None):
         ips = detect(data)
     except Exception as exc:
         if data.get('allow_unknown_ip'):
-            # 放行前仍尊重已锁存的跳变拦截
-            state = _load(Path(directory) / 'admission-state.json')
-            if data.get('detect_ip_change') and state.get('jump_latched'):
-                return {**_failure('检测到 IP 跳变，已持续拦截。请确认是否信任当前 IP'),
-                        'jump_latched': True, 'jump_details': state.get('jump_details', {})}
-            return _failure('出口检测失败，按设置放行', state='allowed')
+            return evaluate(data, {}, directory, acknowledge, expected_ips)
         return _failure('出口检测失败，暂不放行', str(exc))
     try:
         return evaluate(data, ips, directory, acknowledge, expected_ips)

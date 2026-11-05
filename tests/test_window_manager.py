@@ -3,6 +3,7 @@
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 import io
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -38,13 +39,44 @@ class ToolTests(unittest.TestCase):
         old = app.HOME / "old-window.py"
         old.write_text("legacy")
         (bindir / "claude-w").symlink_to(old)
+        (bindir / "claude-window").symlink_to("claude-w")
+        (bindir / "ckill").write_text("old kill command")
         app.write_json(app.STATE, {"mode": "paused"})
         with patch.object(app.subprocess, "run"), redirect_stdout(io.StringIO()):
             installer.install()
             installer.uninstall()
         self.assertEqual((bindir / "claude-w").resolve(), old.resolve())
+        self.assertTrue((bindir / "claude-window").is_symlink())
+        self.assertEqual(os.readlink(bindir / "claude-window"), "claude-w")
+        self.assertEqual((bindir / "ckill").read_text(), "old kill command")
         self.assertEqual(app.read_json(app.STATE), {"mode": "paused"})
         self.assertFalse(app.PLIST.exists())
+
+    def test_corrupt_plan_and_non_object_state_never_send(self):
+        for content in ('{bad', '[]', 'null'):
+            app.STATE.write_text(content)
+            with patch.object(app, 'send_minimal') as send, self.assertRaises(ValueError):
+                app.check(force=True)
+            send.assert_not_called()
+            self.assertEqual(app.STATE.read_text(), content)
+
+    def test_valid_json_with_wrong_shape_records_failure(self):
+        proc = Mock(pid=12345, returncode=0)
+        proc.communicate.return_value = ('[]', '')
+        with patch.object(app.subprocess, 'Popen', return_value=proc) as start:
+            ok, detail = app.send_minimal({})
+        self.assertFalse(ok)
+        self.assertEqual(detail['reason'], 'invalid_claude_response')
+        self.assertTrue(start.call_args.kwargs['start_new_session'])
+        self.assertGreater(app.read_json(app.STATE)['last_request_started_at'], 0)
+
+    def test_request_cleanup_targets_only_its_dedicated_group(self):
+        proc = Mock(pid=12345)
+        with patch.object(app.os, 'getpgid', return_value=12345), patch.object(app.os, 'killpg') as kill:
+            app.stop_request(proc)
+        kill.assert_called_once_with(12345, app.signal.SIGKILL)
+        proc.communicate.assert_called_once()
+        proc.kill.assert_not_called()
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

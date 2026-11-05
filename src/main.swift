@@ -26,6 +26,39 @@ enum GuardState: Equatable {
     }
 }
 
+// Providers return one IP; cap streaming data before URLSession can buffer it.
+class ProbeHTTPDelegate: NSObject, URLSessionDataDelegate {
+    let lock = NSLock()
+    var bodies: [Int: Data] = [:]
+    var callbacks: [Int: (Data?, URLResponse?, Error?) -> Void] = [:]
+
+    func task(session: URLSession, request: URLRequest, completion: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionDataTask {
+        let task = session.dataTask(with: request)
+        lock.lock()
+        bodies[task.taskIdentifier] = Data()
+        callbacks[task.taskIdentifier] = completion
+        lock.unlock()
+        return task
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        completionHandler(response.expectedContentLength > 4096 ? .cancel : .allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let oversized = (bodies[dataTask.taskIdentifier]?.count ?? 4097) + data.count > 4096
+        if !oversized { bodies[dataTask.taskIdentifier]?.append(data) }
+        lock.unlock()
+        if oversized { dataTask.cancel() }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let body = bodies.removeValue(forKey: task.taskIdentifier)
+        let callback = callbacks.removeValue(forKey: task.taskIdentifier)
+        lock.unlock()
+        callback?(body, task.response, error)
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var headless = false
     var settingsOnly = false
@@ -36,6 +69,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var menu: NSMenu!
 
+    let workQueue = DispatchQueue(label: "com.claudeguard.enforcement")
+    var configIsValid = false
+    var loadedConfigData: Data?
+    var enforcementConfirmed = false
+    var enforcementError = ""
+    var lastAppliedHostsUpdates: Bool?
+    var lastAppliedUpdateLock: Bool?
+    var verificationGeneration = 0
+    var launchState: GuardState = .offline
+    var launchConfigData: Data?
     var state: GuardState = .offline
     var currentIP: String = "…"
     var protectionEnabled: Bool = true
@@ -142,15 +185,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             showBlockedAlert(reason: CommandLine.arguments.last ?? "出口未通过检查")
             return
         }
-        // Single-instance guard. LaunchAgent runs the bare binary, Launchpad
-        // runs the .app — match both names and the bundle id.
-        let myPID = getpid()
-        for app in NSWorkspace.shared.runningApplications where app.processIdentifier != myPID {
-            let name = app.localizedName ?? ""
-            if name == "ClaudeGuardMenuBar" || name == "ClaudeGuard" || app.bundleIdentifier == "com.claudeguard.app" {
-                NSApplication.shared.terminate(nil)
-                return
-            }
+        // Settings and the headless guard hold different locks.
+        guard acquireDaemonLock(name: "settings.lock") else {
+            NSApplication.shared.terminate(nil)
+            return
         }
 
         if let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
@@ -186,10 +224,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startGuard()
     }
 
-    func acquireDaemonLock() -> Bool {
+    func acquireDaemonLock(name: String = "daemon.lock") -> Bool {
         let directory = URL(fileURLWithPath: configPath).deletingLastPathComponent()
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } catch { return false }
-        daemonLockFD = open(directory.appendingPathComponent("daemon.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        daemonLockFD = open(directory.appendingPathComponent(name).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
         guard daemonLockFD >= 0 else { return false }
         if flock(daemonLockFD, LOCK_EX | LOCK_NB) == 0 { return true }
         close(daemonLockFD)
@@ -199,7 +237,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func startGuard() {
         loadConfig()
-        logEvent("guard_started", fields: ["mode": ipCheckMode, "check_interval": checkInterval])
+        let initialInterval = checkInterval
+        logEvent("guard_started", fields: ["mode": ipCheckMode, "check_interval": initialInterval])
         if !headless { rebuildMenu() }
 
         setupAppLaunchInterceptor()
@@ -210,6 +249,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupNetworkObserver()  // VPN/route/IP changes while online
         setupWakeObserver()     // re-verify after the Mac wakes from sleep
         DistributedNotificationCenter.default().addObserver(forName: Self.recheckNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.invalidateVerification()
             self?.recheckAsync()
         }
 
@@ -220,20 +260,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // and (paired with the coalescing recheck) guarantees the daemon
         // self-heals from a bad boot within one interval instead of needing a
         // reboot. .utility so the OS won't suspend it the way it can .background.
-        configurePolling()
+        configurePolling(interval: initialInterval)
 
         // Hook self-heal. Separate from recheck() because it guards a different
         // failure: not a network change, but Claude being reinstalled underneath
         // us and quietly detaching the guard.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { self.runIntegrityRepair() }
+        workQueue.asyncAfter(deadline: .now() + 2.0) { self.runIntegrityRepair() }
         Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { _ in
-            DispatchQueue.global(qos: .utility).async { self.runIntegrityRepair() }
+            self.workQueue.async { self.runIntegrityRepair() }
         }
     }
 
-    func configurePolling() {
+    func configurePolling(interval requested: Double? = nil) {
         guard !settingsOnly else { return }
-        let interval = checkInterval
+        let interval = requested ?? checkInterval
         guard pollTimer == nil || scheduledPollInterval != interval else { return }
         pollTimer?.invalidate()
         scheduledPollInterval = interval
@@ -265,17 +305,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard signature != lastIntegritySignature, !integrityRunning else { return }
         integrityRunning = true
         defer { integrityRunning = false }
-        if let task = runHelper("integrity", "", "") {
-            task.waitUntilExit()
-            if task.terminationStatus == 0 { lastIntegritySignature = signature }
-        }
+        if helperSucceeded("integrity", "", "") { lastIntegritySignature = signature }
     }
 
     /// True when /etc/hosts no longer matches what we last applied — an OS
     /// update, another tool or a manual edit reverted our block.
     func hostsDrifted() -> Bool {
         guard let wantDomains = lastAppliedDomainsBlocked,
-              let wantUpdates = lastAppliedBlockUpdates,
+              let wantUpdates = lastAppliedHostsUpdates,
               let content = try? String(contentsOfFile: "/etc/hosts", encoding: .utf8)
         else { return false }
         let hasDomains = content.contains("# BEGIN CLAUDEGUARD BLOCKS")
@@ -303,6 +340,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let satisfied = (path.status == .satisfied)
             let changed = (self.hasNetworkPath != satisfied)
             self.hasNetworkPath = satisfied
+            self.invalidateVerification()
             // Connectivity flipped — re-verify. Down → recheck() declares offline
             // instantly; up → recheck() runs the IP check.
             if changed { self.startBlinking() }
@@ -324,6 +362,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let me = Unmanaged<AppDelegate>.fromOpaque(info).takeUnretainedValue()
             // Network event fired — don't act blindly, just re-verify once it
             // settles; recheck() decides.
+            me.invalidateVerification()
             me.startBlinking()
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) { me.recheck() }
         }
@@ -352,6 +391,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
+            self.invalidateVerification()
             self.startBlinking()
             for delay in [0.5, 3.0, 8.0] {
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
@@ -368,24 +408,30 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self = self else { return }
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             if Self.isClaudeDesktop(app) {
-                guard self.protectionEnabled else { return }
-                // Fail closed on a fresh launch, even offline: an unverified
-                // session must not start.
-                if case .allowed = self.state { return }
-                self.logEvent("desktop_launch_blocked", fields: ["reason": self.policyReason, "ip": self.currentIP])
-                app.forceTerminate()
-                self.runPkill(target: "Claude.app")
-                let reason: String
-                switch self.state {
-                case .offline: reason = "暂时无法确认出口 IP，请检查网络和代理设置。"
-                default:       reason = "当前出口未通过白名单检查：\(self.currentIP)。"
+                self.checkLock.lock()
+                let verified = self.launchState
+                let checkedData = self.launchConfigData
+                self.checkLock.unlock()
+                if checkedData != nil, checkedData == (try? self.boundedData(at: URL(fileURLWithPath: self.configPath))) {
+                    if case .allowed = verified { return }
+                    if case .disabled = verified { return }
                 }
-                self.showBlockedAlert(reason: self.policyReason.isEmpty ? reason : self.policyReason)
+                self.logEvent("desktop_launch_blocked")
+                app.forceTerminate()
+                self.showBlockedAlert(reason: "当前出口或系统防护尚未确认，请重新检测后再启动。")
             }
         }
     }
 
     // MARK: - Core check
+
+    func invalidateVerification() {
+        checkLock.lock()
+        verificationGeneration += 1
+        launchState = .offline
+        launchConfigData = nil
+        checkLock.unlock()
+    }
 
     func recheck() {
         // Coalescing gate: at most one check runs at a time; a request that
@@ -404,7 +450,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         while true {
             checkLock.lock(); recheckQueued = false; checkLock.unlock()
 
-            autoreleasepool { performCheck() }
+            workQueue.sync { autoreleasepool { performCheck() } }
 
             checkLock.lock()
             if recheckQueued { checkLock.unlock(); continue }
@@ -418,6 +464,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// One verification pass: resolve the public IP, fold it into a GuardState,
     /// push enforcement on transitions, publish the verdict.
     func performCheck() {
+        checkLock.lock(); let generation = verificationGeneration; checkLock.unlock()
         loadConfig()
         let previousReason = policyReason
         let checkedMode = ipCheckMode
@@ -429,8 +476,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         jumpBlocked = false
 
         detectedIPs = [:]
-        let newState: GuardState
-        if !protectionEnabled {
+        var newState: GuardState
+        if !configIsValid {
+            policyReason = "配置无效，暂不放行"
+            newState = .offline
+        } else if !protectionEnabled {
             newState = .disabled
         } else {
             let results = detectExits(mode: checkedMode)
@@ -456,10 +506,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 currentIP = "No Internet"
                 newState = .offline
             }
-            if !results.isEmpty { hasNetworkPath = true }
 
         }
 
+        checkLock.lock(); let unchanged = generation == verificationGeneration; checkLock.unlock()
+        if !unchanged || loadedConfigData != (try? boundedData(at: URL(fileURLWithPath: configPath))) {
+            newState = .offline
+            policyReason = "网络或配置已变化，等待重新确认"
+        }
         let previous = state
         state = newState
         if previous != newState || previousReason != policyReason {
@@ -469,10 +523,29 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         verdictIPCheckMode = checkedMode
         verdictAllowedIPs = checkedIPs
         verdictPolicyConfig = checkedPolicy
+        if newState.domainsShouldBeBlocked || lastAppliedDomainsBlocked != false || lastAppliedHostsUpdates != blockAutoUpdates || lastAppliedUpdateLock != blockAutoUpdates {
+            enforcementConfirmed = false
+            checkLock.lock(); launchState = .offline; launchConfigData = nil; checkLock.unlock()
+            writeStateFile() // Do not publish a fresh allow before the system confirms it.
+        }
         apply(from: previous, to: newState)
+        let sameConfig = loadedConfigData == (try? boundedData(at: URL(fileURLWithPath: configPath)))
+        checkLock.lock()
+        if generation != verificationGeneration || !sameConfig {
+            state = .offline
+            enforcementConfirmed = false
+            launchState = .offline
+            launchConfigData = nil
+            recheckQueued = true
+        } else if enforcementConfirmed {
+            launchState = state
+            launchConfigData = loadedConfigData
+        }
+        checkLock.unlock()
         writeStateFile()  // publish verdict for the CLI wrapper
 
-        DispatchQueue.main.async { self.configurePolling() }
+        let interval = checkInterval
+        DispatchQueue.main.async { self.configurePolling(interval: interval) }
     }
 
     /// Publishes the verdict to state.json (single source of truth for the CLI
@@ -488,6 +561,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let dict: [String: Any] = [
             "state": stateStr,
+            "enforcement_confirmed": enforcementConfirmed,
+            "enforcement_error": enforcementError,
+            "policy_config": verdictPolicyConfig,
             "ip": currentIP,
             "detected_ips": detectedIPs,
             "access_mode": verdictPolicyConfig["access_mode"] ?? "whitelist",
@@ -503,52 +579,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "protection_enabled": stateStr != "disabled",
             "updated_at": Date().timeIntervalSince1970
         ]
-        let path = NSString(string: "~/.config/claudeguard/state.json").expandingTildeInPath
+        let path = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("state.json").path
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted]) {
-            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            do {
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            } catch { logEvent("state_write_failed") }
         }
     }
 
     /// The only place that touches the system. Each piece runs only when its
     /// input actually changed.
     func apply(from previous: GuardState, to new: GuardState) {
-        // Transition-only enforcement assumes nothing else edits /etc/hosts;
-        // drift means "pretend we never applied anything" and re-apply.
-        if hostsDrifted() {
-            lastAppliedDomainsBlocked = nil
-            lastAppliedBlockUpdates = nil
-        }
-
-        // Domains: /etc/hosts holds both claude-domain and update-domain blocks,
-        // so rewrite when either flips.
-        let wantBlocked = new.domainsShouldBeBlocked
-        let domainsChanged = (lastAppliedDomainsBlocked != wantBlocked)
-        let updatesChanged = (lastAppliedBlockUpdates != blockAutoUpdates)
-
-        if domainsChanged || updatesChanged {
-            lastAppliedDomainsBlocked = wantBlocked
-            runHelper("sync_hosts", wantBlocked ? "true" : "false", String(blockAutoUpdates))
-        }
-
-        // Auto-update lock (chmod/chflags) — only on change.
-        if updatesChanged {
-            lastAppliedBlockUpdates = blockAutoUpdates
-            runHelper("sync_updates", String(blockAutoUpdates), "")
-        }
-
-        // Desktop app kill + alert.
-        switch new {
-        case .blocked:
+        // Close denied Desktop sessions before DNS and privileged work can delay enforcement.
+        if new.domainsShouldBeBlocked {
             let killed = killDesktopIfRunning()
             if killed { logEvent("desktop_closed", fields: ["reason": policyReason, "ip": currentIP]) }
-            if killed && !hasAlertedThisBlock {   // alert once per blocked episode
+            if killed && !hasAlertedThisBlock {
                 hasAlertedThisBlock = true
-                showBlockedAlert(reason: policyReason.isEmpty ? "当前出口未通过白名单检查：\(currentIP)。" : policyReason)
+                showBlockedAlert(reason: policyReason.isEmpty ? "当前出口未通过检查。" : policyReason)
             }
-        case .allowed, .disabled, .offline:
-            // offline: don't kill a running app — nothing to protect against.
-            hasAlertedThisBlock = false
+        } else { hasAlertedThisBlock = false }
+        if hostsDrifted() {
+            lastAppliedDomainsBlocked = nil
+            lastAppliedHostsUpdates = nil
         }
+        let wantBlocked = new.domainsShouldBeBlocked
+        var hostsOK = lastAppliedDomainsBlocked == wantBlocked && lastAppliedHostsUpdates == blockAutoUpdates
+        if !hostsOK {
+            hostsOK = helperSucceeded("sync_hosts", String(wantBlocked), String(blockAutoUpdates))
+            if hostsOK {
+                lastAppliedDomainsBlocked = wantBlocked
+                lastAppliedHostsUpdates = blockAutoUpdates
+            }
+        }
+        var updatesOK = lastAppliedUpdateLock == blockAutoUpdates
+        if !updatesOK {
+            updatesOK = helperSucceeded("sync_updates", String(blockAutoUpdates), "")
+            if updatesOK { lastAppliedUpdateLock = blockAutoUpdates }
+        }
+        if hostsOK && updatesOK { lastAppliedBlockUpdates = blockAutoUpdates }
+        enforcementConfirmed = hostsOK && updatesOK
+        enforcementError = enforcementConfirmed ? "" : "系统防护执行失败，将在下一次检测重试"
+        if !enforcementConfirmed { logEvent("enforcement_failed") }
         _ = previous
     }
 
@@ -566,6 +639,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         "https://icanhazip.com",
         "https://api.myip.com"
     ]
+    var httpDelegate = ProbeHTTPDelegate()
     var httpSession: URLSession?
     var httpSessionProxy = ""
     var httpSessionDeadline: TimeInterval = 0
@@ -586,7 +660,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         cfg.timeoutIntervalForRequest = deadline
         cfg.timeoutIntervalForResource = deadline
-        let session = URLSession(configuration: cfg)
+        httpDelegate = ProbeHTTPDelegate()
+        let session = URLSession(configuration: cfg, delegate: httpDelegate, delegateQueue: nil)
         httpSession = session
         httpSessionProxy = address
         httpSessionDeadline = deadline
@@ -665,7 +740,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 req.setValue("ClaudeGuard/1.0", forHTTPHeaderField: "User-Agent")
                 // A fresh connection must observe the current route, including VPN changes.
                 req.setValue("close", forHTTPHeaderField: "Connection")
-                let task = session.dataTask(with: req) { data, response, err in
+                let task = httpDelegate.task(session: session, request: req) { data, response, err in
                     let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                     let parsed = Self.parseHTTPIP(data)
                     var detail: [String: Any] = ["http_status": code, "elapsed_ms": Int(Date().timeIntervalSince(started) * 1000)]
@@ -707,7 +782,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     static func parseHTTPIP(_ data: Data?) -> String? {
-        guard let data = data,
+        guard let data = data, data.count <= 4096,
               let str = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !str.isEmpty else { return nil }
         let candidate: String
@@ -716,6 +791,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             candidate = str
         }
+        guard !candidate.contains("%") else { return nil }
         return IPv4Address(candidate) != nil || IPv6Address(candidate) != nil ? candidate : nil
     }
 
@@ -747,7 +823,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     if err != nil { finish(nil) }
                 })
                 conn.receiveMessage { data, _, _, _ in
-                    finish(data.flatMap { Self.parseStun([UInt8]($0)) })
+                    finish(data.flatMap { Self.parseStun([UInt8]($0), transactionID: Array(req.suffix(12))) })
                 }
             case .failed, .cancelled:
                 finish(nil)
@@ -762,82 +838,64 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Parses a STUN Binding Success Response, returning the IPv4 from the
     /// XOR-MAPPED-ADDRESS (0x0020) or plain MAPPED-ADDRESS (0x0001) attribute.
-    static func parseStun(_ b: [UInt8]) -> String? {
-        guard b.count >= 20, b[0] == 0x01, b[1] == 0x01 else { return nil } // 0x0101 success
-        let msgLen = Int(b[2]) << 8 | Int(b[3])
+    static func parseStun(_ b: [UInt8], transactionID: [UInt8]? = nil) -> String? {
         let cookie: [UInt8] = [0x21, 0x12, 0xA4, 0x42]
+        guard b.count >= 20, Array(b[0..<2]) == [0x01, 0x01], Array(b[4..<8]) == cookie else { return nil }
+        let length = Int(b[2]) << 8 | Int(b[3])
+        guard length % 4 == 0, b.count == 20 + length,
+              transactionID == nil || Array(b[8..<20]) == transactionID else { return nil }
         var i = 20
-        let end = min(20 + msgLen, b.count)
-        while i + 4 <= end {
-            let attrType = Int(b[i]) << 8 | Int(b[i + 1])
-            let attrLen = Int(b[i + 2]) << 8 | Int(b[i + 3])
-            let vs = i + 4
-            if vs + attrLen > b.count { break }
-            if (attrType == 0x0020 || attrType == 0x0001), attrLen >= 8, b[vs + 1] == 0x01 {
-                let a0, a1, a2, a3: UInt8
-                if attrType == 0x0020 { // XOR-MAPPED: address XOR'd with the magic cookie
-                    a0 = b[vs + 4] ^ cookie[0]
-                    a1 = b[vs + 5] ^ cookie[1]
-                    a2 = b[vs + 6] ^ cookie[2]
-                    a3 = b[vs + 7] ^ cookie[3]
-                } else {
-                    a0 = b[vs + 4]; a1 = b[vs + 5]; a2 = b[vs + 6]; a3 = b[vs + 7]
+        var result: String?
+        while i + 4 <= b.count {
+            let kind = Int(b[i]) << 8 | Int(b[i + 1])
+            let size = Int(b[i + 2]) << 8 | Int(b[i + 3])
+            let start = i + 4, end = i + 4 + size
+            let padded = end + (4 - size % 4) % 4
+            guard padded <= b.count else { return nil }
+            if [0x0020, 0x0001].contains(kind), size >= 4 {
+                let count = b[start + 1] == 1 ? 4 : (b[start + 1] == 2 ? 16 : 0)
+                guard count > 0, size == count + 4, b[start] == 0 else { return nil }
+                var address = Array(b[(start + 4)..<end])
+                if kind == 0x0020 {
+                    let mask = cookie + Array(b[8..<20])
+                    address = address.enumerated().map { $0.element ^ mask[$0.offset] }
                 }
-                return "\(a0).\(a1).\(a2).\(a3)"
+                result = count == 4 ? IPv4Address(Data(address))?.debugDescription : IPv6Address(Data(address))?.debugDescription
             }
-            i = vs + attrLen
-            if attrLen % 4 != 0 { i += 4 - (attrLen % 4) } // pad to 4-byte boundary
+            i = padded
         }
+        return i == b.count ? result : nil
+    }
+
+    static func addressBytes(_ value: String) -> [UInt8]? {
+        guard !value.contains("%") else { return nil }
+        if let address = IPv4Address(value) { return Array(address.rawValue) }
+        if let address = IPv6Address(value) { return Array(address.rawValue) }
         return nil
     }
 
-    /// Matches an IP against exact entries or IPv4 CIDR ranges — mirrors
-    /// ip_checker.py so the daemon and the CLI agree on what's whitelisted.
     static func isIPAllowed(_ ip: String, allowedList: [String]) -> Bool {
+        guard let address = addressBytes(ip) else { return false }
         for raw in allowedList {
-            let entry = raw.trimmingCharacters(in: .whitespaces)
-            if entry.isEmpty { continue }
-            if entry == ip { return true }
-            if entry.contains("/"), let ipv = ipv4ToUInt32(ip) {
-                let parts = entry.split(separator: "/")
-                if parts.count == 2, let net = ipv4ToUInt32(String(parts[0])), let bits = Int(parts[1]), (0...32).contains(bits) {
-                    let mask: UInt32 = bits == 0 ? 0 : (~UInt32(0)) << (32 - bits)
-                    if (ipv & mask) == (net & mask) { return true }
-                }
-            }
+            let parts = raw.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/", omittingEmptySubsequences: false)
+            guard (1...2).contains(parts.count), let network = addressBytes(String(parts[0])), network.count == address.count else { continue }
+            let bits = parts.count == 1 ? address.count * 8 : (Int(parts[1]) ?? -1)
+            guard (0...(address.count * 8)).contains(bits) else { continue }
+            let full = bits / 8, remainder = bits % 8
+            if address.prefix(full) != network.prefix(full) { continue }
+            if remainder == 0 || (address[full] >> (8 - remainder)) == (network[full] >> (8 - remainder)) { return true }
         }
         return false
     }
 
-    static func ipv4ToUInt32(_ ip: String) -> UInt32? {
-        let p = ip.split(separator: ".", omittingEmptySubsequences: false).compactMap { UInt32($0) }
-        guard p.count == 4, p.allSatisfy({ $0 <= 255 }) else { return nil }
-        return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]
-    }
-
     // MARK: - Process control
-
-    func runPkill(target: String) {
-        let t1 = Process()
-        t1.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        t1.arguments = ["-15", "-f", target]
-        try? t1.run()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
-            let t2 = Process()
-            t2.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            t2.arguments = ["-9", "-f", target]
-            try? t2.run()
-        }
-    }
 
     @discardableResult
     func killDesktopIfRunning() -> Bool {
         let victims = NSWorkspace.shared.runningApplications.filter { Self.isClaudeDesktop($0) }
         guard !victims.isEmpty else { return false }
-        // Terminate the matched processes directly (precise wherever the app was
-        // installed); pkill is the second pass for helpers it spawns.
+        // Bundle identity selects only Claude applications and their registered helpers.
         victims.forEach { $0.forceTerminate() }
-        runPkill(target: "Claude.app")
         return true
     }
 
@@ -887,8 +945,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard Self.executablePath(pid) == path else { continue }
             if kill(pid, SIGKILL) != 0 && errno != ESRCH { failed = true }
         }
-        // Let the existing Desktop helper cleanup's delayed pass finish.
-        if !desktopIDs.isEmpty { Thread.sleep(forTimeInterval: 0.2) }
         return failed ? 1 : 0
     }
 
@@ -922,28 +978,67 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do { try task.run(); return task } catch { return nil }
     }
 
+    func helperSucceeded(_ cmd: String, _ a1: String, _ a2: String) -> Bool {
+        guard let task = runHelper(cmd, a1, a2) else { return false }
+        let end = Date().addingTimeInterval(40)
+        while task.isRunning && Date() < end { Thread.sleep(forTimeInterval: 0.02) }
+        if task.isRunning {
+            task.terminate()
+            let grace = Date().addingTimeInterval(0.5)
+            while task.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.01) }
+            if task.isRunning { kill(task.processIdentifier, SIGKILL) }
+            task.waitUntilExit()
+            return false
+        }
+        task.waitUntilExit()
+        return task.terminationReason == .exit && task.terminationStatus == 0
+    }
+
     // MARK: - Config
 
+    func boundedData(at path: URL) throws -> Data {
+        let fd = open(path.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw NSError(domain: NSCocoaErrorDomain, code: errno == ENOENT ? NSFileReadNoSuchFileError : NSFileReadUnknownError)
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_size <= 1048576 else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError)
+        }
+        let data = try handle.read(upToCount: 1048577) ?? Data()
+        guard data.count <= 1048576 else { throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnknownError) }
+        return data
+    }
+
     func loadConfig() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+        guard let data = try? boundedData(at: URL(fileURLWithPath: configPath)), data.count <= 1048576,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            policyConfig = ["access_mode": "invalid"]
+            loadedConfigData = try? boundedData(at: URL(fileURLWithPath: configPath))
+            configIsValid = false
+            policyConfig = [:]
+            allowedIPs = []
             protectionEnabled = true
             return
         }
-        if let ips = json["allowed_ips"] as? [String] { allowedIPs = ips }
+        if data != loadedConfigData {
+            configIsValid = runPolicy(action: "validate", request: ["data": json])["valid"] as? Bool == true
+            loadedConfigData = data
+        }
         policyConfig = json
-        let storedMode = json["ip_check_mode"] == nil ? "both" : ((json["ip_check_mode"] as? String) ?? "invalid")
-        ipCheckMode = storedMode == "auto" ? "both" : storedMode
-        if let p = json["protection_enabled"] as? Bool { protectionEnabled = p }
-        if let u = json["block_auto_updates"] as? Bool { blockAutoUpdates = u }
-        if let m = json["model_override_enabled"] as? Bool { modelOverrideEnabled = m }
-        if let d = json["default_model"] as? String { defaultModel = d }
+        allowedIPs = json["allowed_ips"] as? [String] ?? []
+        let mode = json["ip_check_mode"] as? String ?? "both"
+        ipCheckMode = mode == "auto" ? "both" : mode
+        protectionEnabled = configIsValid ? (json["protection_enabled"] as? Bool ?? true) : true
+        blockAutoUpdates = configIsValid ? (json["block_auto_updates"] as? Bool ?? true) : true
+        modelOverrideEnabled = json["model_override_enabled"] as? Bool ?? false
+        defaultModel = json["default_model"] as? String ?? "claude-opus-4-8"
     }
 
     func saveConfig() {
         var json: [String: Any] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+        if let data = try? boundedData(at: URL(fileURLWithPath: configPath)),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { json = existing }
         for key in ["access_mode", "risk_threshold", "risk_cache_ttl", "detect_ip_change", "allow_unknown_ip", "check_interval", "http_proxy", "cli_http_proxy_enabled"] {
             if let value = policyConfig[key] { json[key] = value }
@@ -1053,10 +1148,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func refreshSettingsState() {
         loadConfig()
         let path = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("state.json")
-        if let data = try? Data(contentsOf: path),
+        if let data = try? boundedData(at: path),
            let snapshot = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let updated = snapshot["updated_at"] as? Double,
-           Date().timeIntervalSince1970 - updated <= max(7, checkInterval + 4) {
+           (0...max(7, checkInterval + 4)).contains(Date().timeIntervalSince1970 - updated),
+           snapshot["enforcement_confirmed"] as? Bool != false {
             currentIP = snapshot["ip"] as? String ?? "No Internet"
             detectedIPs = snapshot["detected_ips"] as? [String: String] ?? [:]
             policyReason = snapshot["reason"] as? String ?? ""
@@ -1318,22 +1414,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let done = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in done.signal() }
         do { try process.run() } catch { return failure }
+        let readerDone = DispatchSemaphore(value: 0)
+        let outputLock = NSLock()
+        var raw = Data()
+        var oversized = false
+        DispatchQueue.global(qos: .utility).async {
+            while let chunk = try? output.fileHandleForReading.read(upToCount: 8192), !chunk.isEmpty {
+                outputLock.lock()
+                if raw.count + chunk.count > 1048576 { oversized = true }
+                if !oversized { raw.append(chunk) }
+                outputLock.unlock()
+            }
+            readerDone.signal()
+        }
         input.fileHandleForWriting.write(encoded)
         input.fileHandleForWriting.closeFile()
         if done.wait(timeout: .now() + 45) == .timedOut {
             process.terminate()
+            if done.wait(timeout: .now() + 0.5) == .timedOut { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
             return failure
         }
-        let raw = output.fileHandleForReading.readDataToEndOfFile()
+        guard readerDone.wait(timeout: .now() + 1) == .success, process.terminationStatus == 0 else { return failure }
+        outputLock.lock(); defer { outputLock.unlock() }
+        guard !oversized else { return failure }
         return (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] ?? failure
+    }
+
+    func admissionState(at path: URL) -> (Data?, Bool) {
+        do { return (try boundedData(at: path), true) }
+        catch let error as NSError { return (nil, error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError) }
     }
 
     func evaluatePolicy(data: [String: Any], ips: [String: String]) -> [String: Any] {
         let request: [String: Any] = ["data": data, "ips": ips]
         let encoded = try? JSONSerialization.data(withJSONObject: request, options: .sortedKeys)
         let path = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("admission-state.json")
-        let before = try? Data(contentsOf: path)
-        if encoded == cachedPolicyRequest, before == cachedPolicyState, Date() >= cachedPolicyCreated, Date() < cachedPolicyExpires,
+        let (before, readable) = admissionState(at: path)
+        if readable, encoded == cachedPolicyRequest, before == cachedPolicyState, Date() >= cachedPolicyCreated, Date() < cachedPolicyExpires,
            var outcome = cachedPolicyOutcome {
             if var scores = outcome["scores"] as? [String: [String: Any]] {
                 for ip in Array(scores.keys) { scores[ip]?["cached"] = true }
@@ -1346,10 +1464,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Reuse stable policy transactions; fresh IP probes and shared-state reads still run every tick.
         let resultState = outcome["state"] as? String
         let scores = outcome["scores"] as? [String: [String: Any]] ?? [:]
+        let threshold = (data["risk_threshold"] as? NSNumber)?.doubleValue ?? 50
+        let deniedScore = scores.values.contains { entry in
+            guard let score = entry["score"] as? NSNumber else { return false }
+            return score.doubleValue.isFinite && score.doubleValue > threshold && score.doubleValue <= 100
+        }
         let reusable = resultState == "allowed" || (resultState == "blocked"
             && outcome["reason"] as? String != "策略检查失败，暂不放行"
-            && (data["access_mode"] as? String ?? "whitelist" != "risk" || outcome["jump_latched"] as? Bool == true || !scores.isEmpty))
-        if encoded != nil, reusable, before == (try? Data(contentsOf: path)) {
+            && ((data["access_mode"] as? String ?? "whitelist") != "risk" || outcome["jump_latched"] as? Bool == true || deniedScore))
+        let (after, stillReadable) = admissionState(at: path)
+        if readable, stillReadable, encoded != nil, reusable, before == after {
             var expires = Date.distantFuture
             let ttl = (data["risk_cache_ttl"] as? NSNumber)?.doubleValue ?? 21600
             for entry in scores.values {
@@ -1471,8 +1595,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         settingsBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
-            let freshIPs = self.detectExits(mode: mode)
-            let result = self.runPolicy(action: "ack-evaluate", request: ["data": data, "ips": freshIPs, "expected_ips": expected])
+            let probe = AppDelegate()
+            probe.policyConfig = data
+            probe.configPath = self.configPath
+            probe.policyScriptPath = self.policyScriptPath
+            let freshIPs = probe.detectExits(mode: mode)
+            let result = probe.runPolicy(action: "ack-evaluate", request: ["data": data, "ips": freshIPs, "expected_ips": expected])
             self.recheckAsync()
             DispatchQueue.main.async {
                 let notice = NSAlert()
@@ -1517,27 +1645,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
     }
 
+    func textInput(title: String, value: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = title
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        input.stringValue = value
+        alert.accessoryView = input
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     @objc func onChangeModel() {
-        let script = "display dialog \"输入模型名称，例如 claude-opus-4-8：\" default answer \"\(defaultModel)\" with title \"ClaudeGuard 固定模型\" buttons {\"取消\", \"保存\"} default button \"保存\" cancel button \"取消\""
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        try? process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        if let out = String(data: data, encoding: .utf8), out.contains("text returned:") {
-            let parts = out.components(separatedBy: "text returned:")
-            if parts.count > 1 {
-                let raw = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                if !raw.isEmpty {
-                    defaultModel = raw
-                    saveConfig()
-                    rebuildMenu()
-                }
-            }
-        }
+        guard let value = textInput(title: "输入模型名称", value: defaultModel), !value.isEmpty else { return }
+        defaultModel = value
+        saveConfig()
+        rebuildMenu()
     }
 
     @objc func onAddCurrentIP(_ sender: NSMenuItem) {
@@ -1548,25 +1672,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func onManageIPs() {
-        let ipsStr = allowedIPs.joined(separator: ", ")
-        let script = "display dialog \"输入允许使用的出口 IP 或 CIDR 网段，多个地址用英文逗号分隔：\" default answer \"\(ipsStr)\" with title \"ClaudeGuard IP 白名单\" buttons {\"取消\", \"保存\"} default button \"保存\" cancel button \"取消\""
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        try? process.run()
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        if let out = String(data: data, encoding: .utf8), out.contains("text returned:") {
-            let parts = out.components(separatedBy: "text returned:")
-            if parts.count > 1 {
-                let raw = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                allowedIPs = raw.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                saveConfig()
-                recheckAsync()
-            }
+        guard let value = textInput(title: "IP 或 CIDR 白名单（英文逗号分隔）", value: allowedIPs.joined(separator: ", ")) else { return }
+        let entries = value.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var proposed = policyConfig
+        proposed["allowed_ips"] = entries
+        guard runPolicy(action: "validate", request: ["data": proposed])["valid"] as? Bool == true else {
+            let alert = NSAlert()
+            alert.messageText = "白名单或配置无效，未保存"
+            alert.runModal()
+            return
         }
+        allowedIPs = entries
+        saveConfig()
+        recheckAsync()
     }
 
     @objc func onQuit() { NSApplication.shared.terminate(nil) }

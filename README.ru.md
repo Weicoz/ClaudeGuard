@@ -48,7 +48,7 @@ quarantine-флага, поэтому **Gatekeeper ничего не блоки�
 **Вариант 1 - одной строкой** (скачает и соберёт с GitHub):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Weicoz/ClaudeGuard/main/install.sh)"
 ```
 
 **Вариант 2 - из локальной копии** (склонированное или скачанное репо; GitHub не задействуется):
@@ -57,7 +57,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/ma
 ./install.sh
 ```
 
-В обоих случаях скрипт соберёт всё под вашу архитектуру (Apple Silicon или Intel), поставит лёгкий фоновый демон в
+В обоих случаях скрипт соберёт всё для Apple Silicon (arm64), поставит лёгкий фоновый демон в
 автозапуск и повесит обёртку на `claude`. Один раз спросит пароль (`sudo` нужен для правки `/etc/hosts` и pf)
 и предложит добавить текущий IP в whitelist - соглашайтесь, **только если вы сейчас под своим VPN.**
 

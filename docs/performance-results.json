@@ -102,5 +102,29 @@
     "state": "allowed",
     "state_age_seconds": 1.347,
     "check_interval": 3
+  },
+  "adversarial_review_loopback": {
+    "scope": "isolated HTTP guard; enforcement and repair side effects replaced",
+    "transport": "loopback HTTP",
+    "sample_seconds": 60,
+    "actual_elapsed_seconds": 61.268,
+    "cpu_percent": 0.2396,
+    "cpu_main_percent": 0.2396,
+    "physical_footprint_mb": 5.359,
+    "physical_footprint_peak_mb": 5.457,
+    "rss_mb_min": 17.924,
+    "rss_mb_max": 19.12,
+    "max_children_after_warmup": 0,
+    "process_counts": {
+      "child_cpu_seconds_after_warmup": 0,
+      "verified_probes": 26,
+      "policy_processes_after_warmup": 0,
+      "helper_requests_after_warmup": 0,
+      "policy_processes": 3,
+      "helper_requests": 1,
+      "failed_probes": 0
+    },
+    "loopback_requests": 26,
+    "meets_idle_targets": true
   }
 }

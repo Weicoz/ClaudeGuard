@@ -13,6 +13,7 @@ from pathlib import Path
 import plistlib
 import re
 import resource
+import signal
 import subprocess
 import sys
 import time
@@ -49,22 +50,22 @@ def ensure_dirs():
 
 def read_json(path):
     try:
-        return json.loads(path.read_text())
-    except (FileNotFoundError, ValueError, OSError):
+        value = json.loads(path.read_text())
+        if not isinstance(value, dict):
+            raise ValueError("JSON must be an object")
+        return value
+    except FileNotFoundError:
+        return {}
+    except (ValueError, OSError):
+        if path in (STATE, CONFIG):
+            raise ValueError(f"窗口配置或计划损坏，已停止执行：{path.name}") from None
         return {}
 
 
 def write_json(path, data):
     ensure_dirs()
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
-            f.write("\n")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    from src.policy import atomic_json
+    atomic_json(path, data)
 
 
 def log(event, **data):
@@ -96,6 +97,8 @@ def epoch(value):
 
 
 def percent(value):
+    if isinstance(value, bool):
+        return None
     try:
         n = float(value)
         return n if 0 <= n <= 100 else None
@@ -300,7 +303,7 @@ def auth_ok():
         p = subprocess.run([str(CLAUDE), "auth", "status"], capture_output=True, text=True, timeout=8)
         a = json.loads(p.stdout) if p.returncode == 0 else {}
         return a.get("loggedIn") is True and a.get("authMethod") == "claude.ai" and a.get("apiProvider") == "firstParty"
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, AttributeError, TypeError, subprocess.TimeoutExpired):
         return False
 
 
@@ -377,6 +380,15 @@ def refresh_usage():
         return False, "usage_query_or_cache_failed"
 
 
+def stop_request(proc):
+    # The wrapper and its Claude child share this dedicated group.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.communicate()
+
+
 def send_minimal(state):
     env = os.environ.copy()
     for key in list(env):
@@ -388,7 +400,7 @@ def send_minimal(state):
                "-p", "--model", "haiku", "--output-format", "json", "Reply exactly OK."]
     start = time.monotonic()
     before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-    proc = subprocess.Popen(command, cwd=WORK, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen(command, cwd=WORK, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     started_at = time.time()
     request_id = f"{time.time_ns()}-{proc.pid}"
     try:
@@ -396,8 +408,7 @@ def send_minimal(state):
         state["last_request_started_at"] = started_at
         write_json(STATE, state)
     except OSError:
-        proc.kill()
-        proc.communicate()
+        stop_request(proc)
         raise
     while True:
         try:
@@ -406,12 +417,7 @@ def send_minimal(state):
         except subprocess.TimeoutExpired:
             good, reason = tun_ok()
             if not good or time.monotonic() - start > 120:
-                proc.terminate()
-                try:
-                    proc.communicate(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.communicate()
+                stop_request(proc)
                 return False, {"request_id": request_id, "started_at": started_at,
                                "reason": "tun_lost" if not good else "timeout", "duration_s": round(time.monotonic()-start, 1)}
     detail = {"request_id": request_id, "started_at": started_at, "duration_s": round(time.monotonic()-start, 1),
@@ -424,10 +430,10 @@ def send_minimal(state):
         usage = result.get("usage") or {}
         detail["input_tokens"] = usage.get("input_tokens")
         detail["output_tokens"] = usage.get("output_tokens")
-    except ValueError:
+    except (ValueError, AttributeError, TypeError):
         detail["result"] = "non_json"
     if proc.returncode or detail.get("is_error") or detail.get("result") == "non_json":
-        detail["reason"] = (stderr or stdout)[-400:]
+        detail["reason"] = "invalid_claude_response" if detail.get("result") == "non_json" else f"claude_exit_{proc.returncode}"
         return False, detail
     return True, detail
 

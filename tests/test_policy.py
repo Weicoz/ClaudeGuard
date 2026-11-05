@@ -301,7 +301,7 @@ class PolicyTests(unittest.TestCase):
         config.config.update(access_mode='risk', allowed_ips=[])
         with patch.object(cli_wrapper, 'ConfigManager', return_value=config), patch.object(
                 cli_wrapper, 'get_verdict', return_value=('allowed', A, None)), patch.object(
-                cli_wrapper, 'repair_cli'), patch.object(cli_wrapper, 'sync_hosts_file'), patch.object(
+                cli_wrapper, 'repair_cli'), patch.object(cli_wrapper, 'sync_hosts_file', return_value=(True, 'ok')), patch.object(
                 cli_wrapper, 'run_real_claude') as launch, patch.object(cli_wrapper.signal, 'signal'):
             cli_wrapper.main()
             launch.assert_called_once_with(config)

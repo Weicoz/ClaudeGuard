@@ -4,6 +4,7 @@ import socket
 import struct
 import os
 import ipaddress
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 IP_CHECK_SERVICES = [
@@ -19,46 +20,54 @@ STUN_SERVERS = [
     ("stun.cloudflare.com", 3478),
 ]
 
-def _parse_stun(data):
-    """Parses a STUN Binding Success Response -> IPv4 string, or None."""
-    if len(data) < 20 or data[0] != 0x01 or data[1] != 0x01:
-        return None
-    msg_len = (data[2] << 8) | data[3]
+def _parse_stun(data, transaction_id=None):
+    """Validate a complete STUN binding response before reading its address."""
     cookie = b"\x21\x12\xA4\x42"
-    i = 20
-    end = min(20 + msg_len, len(data))
-    while i + 4 <= end:
-        atype = (data[i] << 8) | data[i + 1]
-        alen = (data[i + 2] << 8) | data[i + 3]
-        vs = i + 4
-        if vs + alen > len(data):
-            break
-        if atype in (0x0020, 0x0001) and alen >= 8 and data[vs + 1] == 0x01:
-            if atype == 0x0020:  # XOR-MAPPED-ADDRESS: XOR with the magic cookie
-                a = bytes(data[vs + 4 + k] ^ cookie[k] for k in range(4))
-            else:                # plain MAPPED-ADDRESS
-                a = data[vs + 4:vs + 8]
-            return "%d.%d.%d.%d" % (a[0], a[1], a[2], a[3])
-        i = vs + alen
-        if alen % 4:
-            i += 4 - (alen % 4)
-    return None
+    if len(data) < 20 or data[:2] != b"\x01\x01" or data[4:8] != cookie:
+        return None
+    length = int.from_bytes(data[2:4], 'big')
+    if length % 4 or len(data) != 20 + length or (transaction_id is not None and data[8:20] != transaction_id):
+        return None
+    i, result = 20, None
+    while i + 4 <= len(data):
+        kind, size = struct.unpack('!HH', data[i:i + 4])
+        start = i + 4
+        end = start + size
+        padded = end + (-size % 4)
+        if padded > len(data):
+            return None
+        if kind in (0x0020, 0x0001) and size >= 4:
+            family = data[start + 1]
+            count = {1: 4, 2: 16}.get(family)
+            if count is None or size != count + 4 or data[start] != 0:
+                return None
+            address = data[start + 4:end]
+            if kind == 0x0020:
+                address = bytes(a ^ b for a, b in zip(address, cookie + data[8:20]))
+            result = str(ipaddress.ip_address(address))
+        i = padded
+    return result if i == len(data) else None
 
 def stun_public_ip(timeout=1.0):
     """Public IP via STUN — one UDP round-trip, faster than HTTP. IP or None;
     tries each server in turn (some networks block UDP/STUN, HTTP covers those)."""
+    deadline = time.monotonic() + timeout
     for host, port in STUN_SERVERS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
             txid = os.urandom(12)
             msg = b"\x00\x01\x00\x00" + b"\x21\x12\xA4\x42" + txid
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(timeout)
+            s.settimeout(remaining)
             try:
-                s.sendto(msg, (host, port))
-                data, _ = s.recvfrom(2048)
+                s.connect((host, port))
+                s.send(msg)
+                data = s.recv(2048)
             finally:
                 s.close()
-            ip = _parse_stun(data)
+            ip = _parse_stun(data, txid)
             if ip:
                 try:
                     ipaddress.ip_address(ip)
@@ -82,30 +91,28 @@ def fetch_public_ip(timeout=2.0, mode="http", proxy=None):
         open_url = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         ).open
+    deadline = time.monotonic() + timeout
     for service in IP_CHECK_SERVICES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
             req = urllib.request.Request(
                 service,
                 headers={"User-Agent": "ClaudeGuard/1.0"}
             )
-            with open_url(req, timeout=timeout) as resp:
-                data = resp.read().decode("utf-8").strip()
-                if not data:
+            with open_url(req, timeout=remaining) as resp:
+                raw = resp.read(4097)
+                if len(raw) > 4096:
                     continue
+                data = raw.decode("utf-8").strip()
                 if data.startswith("{"):
-                    res = json.loads(data)
-                    ip = res.get("ip") or res.get("ip_addr")
-                    if ip:
-                        return ip.strip(), None
+                    payload = json.loads(data)
+                    ip = payload.get("ip") or payload.get("ip_addr")
                 else:
-                    # Raw IP string
-                    ip = data.strip().split("\n")[0]
-                    # Validate IP format
-                    try:
-                        ipaddress.ip_address(ip)
-                        return ip, None
-                    except ValueError:
-                        continue
+                    ip = data
+                if isinstance(ip, str) and '%' not in ip:
+                    return str(ipaddress.ip_address(ip.strip())), None
         except Exception:
             continue
 

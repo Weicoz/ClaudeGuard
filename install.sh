@@ -3,19 +3,19 @@
 # ClaudeGuard installer.
 #
 # Works two ways from the SAME file:
-#   • One-liner:   bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/main/install.sh)"
+#   • One-liner:   bash -c "$(curl -fsSL https://raw.githubusercontent.com/Weicoz/ClaudeGuard/main/install.sh)"
 #   • Local:       ./install.sh   (from a git checkout or unpacked archive)
 #
 # When run via curl|bash there's no local source tree, so the script first
 # fetches the repo, then compiles the Swift menu bar app + C helper NATIVELY on
-# this Mac (Apple Silicon or Intel). Locally-compiled binaries carry no
+# this Apple Silicon Mac. Locally-compiled binaries carry no
 # quarantine flag, so Gatekeeper never blocks them — no Apple Developer account,
 # no code-signing, no notarization required.
 set -euo pipefail
 
 # Which repo the one-liner pulls from. Override without editing:
 #   CLAUDEGUARD_REPO=you/ClaudeGuard bash -c "$(curl -fsSL .../install.sh)"
-REPO="${CLAUDEGUARD_REPO:-keii-2596/ClaudeGuard}"
+REPO="${CLAUDEGUARD_REPO:-Weicoz/ClaudeGuard}"
 BRANCH="${CLAUDEGUARD_BRANCH:-main}"
 
 INSTALL_DIR="$HOME/.local/share/ClaudeGuard"
@@ -54,6 +54,8 @@ printf '%s\n' "        VPN-whitelist guard for Claude on macOS${RST}"
 printf '\n'
 
 [ "$(uname -s)" = "Darwin" ] || die "ClaudeGuard is macOS-only."
+[ "$(uname -m)" = "arm64" ] || die "This release supports Apple Silicon only."
+/usr/bin/python3 --version >/dev/null 2>&1 || die "A working /usr/bin/python3 is required."
 
 # --- Bootstrap: fetch source when piped from curl (no local tree) -----------
 _src="${BASH_SOURCE[0]:-}"
@@ -96,9 +98,55 @@ if [ ! -f "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" ] && { ! have clang || ! hav
     ok "Command Line Tools ready."
 fi
 
+# Detect incompatible global rules before changing any installed files.
+# No global PF reload is safe to infer on a Mac with other network tools.
+if [ "$(id -u)" -eq 0 ]; then
+    PF_RULES="$(/sbin/pfctl -sr 2>/dev/null)" || die "Cannot inspect the current PF rules."
+else
+    PF_RULES="$(sudo /sbin/pfctl -sr 2>/dev/null)" || die "Cannot inspect PF; installation unchanged."
+fi
+if printf '%s\n' "$PF_RULES" | /usr/bin/grep -Eq 'to[[:space:]]+<claude_guard>'; then
+    die "Legacy global ClaudeGuard PF rules detected. Keep the current installation; administrator migration is required. See docs/release-macos.md."
+fi
+printf '%s\n' "$PF_RULES" | /usr/bin/grep -Eq 'anchor[[:space:]]+"com\.apple/(\*|claudeguard)"' \
+    || die "PF has no ClaudeGuard-compatible anchor hook. Ask the administrator to configure one before installing."
+# Never turn a user-writable directory and its old symlinks into a root trust boundary.
+/usr/bin/python3 - "$SOURCE_DIR" "$HELPER_SYS_DIR" /Library/Logs/ClaudeGuard <<'PYTRUST'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from native.macos_network_helper import checked_directory
+for value in sys.argv[2:]:
+    path = Path(value)
+    if path.exists() or path.is_symlink():
+        fd = checked_directory(path, 0)
+        os.close(fd)
+PYTRUST
+
+# Build and verify before stopping the installed guard or replacing its source.
+BUILD_TMP="$(mktemp -d)"
+cleanup_build() { rm -rf "$BUILD_TMP"; }
+trap 'cleanup_build; if [ -n "${BOOT_TMP:-}" ]; then rm -rf "$BOOT_TMP"; fi' EXIT
+if [ -f "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" ] && [ -f "$SOURCE_DIR/prebuilt/hosts-helper" ]; then
+    for name in ClaudeGuardMenuBar hosts-helper; do
+        /usr/bin/lipo "$SOURCE_DIR/prebuilt/$name" -verify_arch arm64
+        /usr/bin/codesign --verify --strict "$SOURCE_DIR/prebuilt/$name"
+        cp "$SOURCE_DIR/prebuilt/$name" "$BUILD_TMP/$name"
+    done
+else
+    clang -O2 "$SOURCE_DIR/src/hosts_helper.c" -o "$BUILD_TMP/hosts-helper"
+    swiftc -O "$SOURCE_DIR/src/main.swift" -o "$BUILD_TMP/ClaudeGuardMenuBar"
+fi
+if [ -f "$PLIST_PATH" ]; then
+    launchctl bootout "gui/$(id -u)/com.claudeguard.daemon" 2>/dev/null || true
+fi
+mkdir -p "$HOME/Library/Logs/ClaudeGuard"
+chmod 700 "$HOME/Library/Logs/ClaudeGuard"
+
 # --- 1. Stage source into the install dir -----------------------------------
 info "Installing to ${BOLD}$INSTALL_DIR${RST}"
-mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/src"
+mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/src" "$INSTALL_DIR/native"
+cp "$SOURCE_DIR/native/macos_network_helper.py" "$INSTALL_DIR/native/macos_network_helper.py"
 /usr/bin/rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '.DS_Store' \
     "$SOURCE_DIR/src/" "$INSTALL_DIR/src/"
 for f in "$SOURCE_DIR/bin/"*; do
@@ -106,25 +154,11 @@ for f in "$SOURCE_DIR/bin/"*; do
     cp -R "$f" "$INSTALL_DIR/bin/"
 done
 
-# --- 2. Compile the native binaries -----------------------------------------
-# A previous install may have left a root-owned setuid hosts-helper behind; as a
-# regular user we can only remove-then-recreate (dir write perm governs unlink).
-if [ -f "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" ] && [ -f "$SOURCE_DIR/prebuilt/hosts-helper" ]; then
-    info "Installing precompiled macOS binaries…"
-    /usr/bin/lipo "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" -verify_arch "$(uname -m)"
-    /usr/bin/lipo "$SOURCE_DIR/prebuilt/hosts-helper" -verify_arch "$(uname -m)"
-    cp "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new"
-    mv -f "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new" "$INSTALL_DIR/bin/ClaudeGuardMenuBar"
-    rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || sudo rm -f "$INSTALL_DIR/bin/hosts-helper"
-    cp "$SOURCE_DIR/prebuilt/hosts-helper" "$INSTALL_DIR/bin/hosts-helper"
-else
-    info "Compiling privileged hosts helper (C)…"
-    rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || sudo rm -f "$INSTALL_DIR/bin/hosts-helper"
-    clang -O2 "$SOURCE_DIR/src/hosts_helper.c" -o "$INSTALL_DIR/bin/hosts-helper"
-    info "Compiling native menu bar app (Swift)…"
-    swiftc -O "$SOURCE_DIR/src/main.swift" -o "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new"
-    mv -f "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new" "$INSTALL_DIR/bin/ClaudeGuardMenuBar"
-fi
+# --- 2. Install verified native binaries ------------------------------------
+cp "$BUILD_TMP/ClaudeGuardMenuBar" "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new"
+mv -f "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new" "$INSTALL_DIR/bin/ClaudeGuardMenuBar"
+rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || sudo rm -f "$INSTALL_DIR/bin/hosts-helper"
+cp "$BUILD_TMP/hosts-helper" "$INSTALL_DIR/bin/hosts-helper"
 
 chmod +x "$INSTALL_DIR/bin/claudeguard" "$INSTALL_DIR/bin/ClaudeGuardMenuBar" \
          "$INSTALL_DIR/src/cli_wrapper.py" "$INSTALL_DIR/src/app_launcher.py" \
@@ -213,24 +247,18 @@ fi
 # --- 6. LaunchAgent (autostart at login) ------------------------------------
 info "Registering login-autostart LaunchAgent…"
 mkdir -p "$HOME/Library/LaunchAgents"
-cat > "$PLIST_PATH" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>com.claudeguard.daemon</string>
-    <key>ProgramArguments</key>
-    <array><string>$INSTALL_DIR/bin/ClaudeGuardMenuBar</string><string>--daemon</string></array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-    <key>StandardOutPath</key><string>/tmp/claudeguard.log</string>
-    <key>StandardErrorPath</key><string>/tmp/claudeguard.err</string>
-</dict>
-</plist>
-EOF
-pkill -f '/ClaudeGuardMenuBar( |$)' 2>/dev/null || true
+/usr/bin/python3 - "$PLIST_PATH" "$INSTALL_DIR" <<'PYPLIST'
+import os, plistlib, sys
+path, install = sys.argv[1:]
+with open(path, 'wb') as stream:
+    plistlib.dump({'Label': 'com.claudeguard.daemon',
+                  'ProgramArguments': [install + '/bin/ClaudeGuardMenuBar', '--daemon'],
+                  'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False},
+                  'StandardOutPath': os.path.expanduser('~/Library/Logs/ClaudeGuard/daemon.log'),
+                  'StandardErrorPath': os.path.expanduser('~/Library/Logs/ClaudeGuard/daemon.err')}, stream)
+PYPLIST
+
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
-launchctl load "$PLIST_PATH" 2>/dev/null || true
 
 # --- 7. Root network helper via a LaunchDaemon (no sudoers) ------------------
 # The user-session daemon has no root; it stages the desired /etc/hosts + pf
@@ -242,37 +270,50 @@ info "Installing the root network helper (LaunchDaemon — needs your password o
 # Private staging dir + trigger file the helper watches (must exist before load).
 mkdir -p "$CONFIG_DIR/pending"
 chmod 700 "$CONFIG_DIR/pending"
-[ -f "$CONFIG_DIR/pending/request" ] || : > "$CONFIG_DIR/pending/request"
+/usr/bin/python3 - "$CONFIG_DIR/pending/request" <<'PYTRIGGER'
+import os, stat, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit('Helper trigger must be a regular file')
+finally:
+    os.close(fd)
+PYTRIGGER
 
-HELPER_PLIST_BODY="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key><string>com.claudeguard.helper</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>$HELPER_SYS_DIR/hosts-helper</string>
-        <string>$CONFIG_DIR</string>
-    </array>
-    <key>WatchPaths</key>
-    <array><string>$CONFIG_DIR/pending/request</string></array>
-    <key>StandardOutPath</key><string>/tmp/claudeguard-helper.log</string>
-    <key>StandardErrorPath</key><string>/tmp/claudeguard-helper.err</string>
-</dict>
-</plist>"
+HELPER_PLIST_BODY="$(/usr/bin/python3 - "$HELPER_SYS_DIR" "$CONFIG_DIR" <<'PYPLIST'
+import os, plistlib, sys
+root, config = sys.argv[1:]
+print(plistlib.dumps({'Label': 'com.claudeguard.helper',
+                     'ProgramArguments': [root + '/hosts-helper', config, str(os.getuid())],
+                     'WatchPaths': [config + '/pending/request'], 'ThrottleInterval': 1,
+                     'StandardOutPath': '/Library/Logs/ClaudeGuard/helper.log',
+                     'StandardErrorPath': '/Library/Logs/ClaudeGuard/helper.err'}).decode())
+PYPLIST
+)"
 
 install_root_helper() {   # $1 = sudo prefix ("" when already root)
     local S="$1"
+    $S launchctl bootout system "$HELPER_PLIST" 2>/dev/null || true
+    if [ -L "$HELPER_SYS_DIR" ]; then die "Refusing symlinked helper directory"; fi
+    if [ -L /Library/Logs/ClaudeGuard ]; then die "Refusing symlinked helper log directory"; fi
+    $S mkdir -p /Library/Logs/ClaudeGuard
+    $S chown root:wheel /Library/Logs/ClaudeGuard
+    $S chmod 755 /Library/Logs/ClaudeGuard
     $S mkdir -p "$HELPER_SYS_DIR"
+    $S chown root:wheel "$HELPER_SYS_DIR"
+    $S chmod 755 "$HELPER_SYS_DIR"
+    $S rm -f "$HELPER_SYS_DIR/hosts-helper" "$HELPER_SYS_DIR/macos_network_helper.py"
     $S cp "$INSTALL_DIR/bin/hosts-helper" "$HELPER_SYS_DIR/hosts-helper"
-    $S chown root:wheel "$HELPER_SYS_DIR" "$HELPER_SYS_DIR/hosts-helper"
+    $S cp "$SOURCE_DIR/native/macos_network_helper.py" "$HELPER_SYS_DIR/macos_network_helper.py"
+    $S chown root:wheel "$HELPER_SYS_DIR/hosts-helper" "$HELPER_SYS_DIR/macos_network_helper.py"
+    $S chmod 644 "$HELPER_SYS_DIR/macos_network_helper.py"
     $S chmod 755 "$HELPER_SYS_DIR/hosts-helper"     # root-owned, not user-writable
     printf '%s\n' "$HELPER_PLIST_BODY" | $S tee "$HELPER_PLIST" >/dev/null
     $S chown root:wheel "$HELPER_PLIST"
     $S chmod 644 "$HELPER_PLIST"
     $S launchctl bootout system "$HELPER_PLIST" 2>/dev/null || true
     $S launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null \
-        || $S launchctl load -w "$HELPER_PLIST" 2>/dev/null || true
+        || $S launchctl load -w "$HELPER_PLIST"
 }
 
 if [ "$(id -u)" -eq 0 ]; then
@@ -284,6 +325,7 @@ else
 fi
 # The compiled copy in the user dir is never executed now; drop it.
 rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || true
+launchctl load "$PLIST_PATH"
 
 # --- 8. First-run: offer to whitelist the current public IP -----------------
 # Best done while you're connected to your VPN right now.

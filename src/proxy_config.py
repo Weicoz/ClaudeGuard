@@ -6,19 +6,22 @@ def validate_proxy(data):
     enabled = data.get('cli_http_proxy_enabled', False)
     if type(enabled) is not bool:
         raise ValueError('命令行 HTTP 代理开关必须是布尔值')
-    if not enabled:
-        return None
     value = data.get('http_proxy', '')
+    if not isinstance(value, str):
+        raise ValueError('HTTP 代理地址必须是字符串')
+    if not enabled and not value:
+        return None
     try:
         url = urlsplit(value)
         valid = (url.scheme == 'http' and url.hostname and url.port
                  and not url.username and not url.password and url.path in ('', '/')
+                 and '%' not in url.hostname
                  and not url.query and not url.fragment and not any(c.isspace() for c in value))
     except (ValueError, TypeError, AttributeError):
         valid = False
     if not valid:
         raise ValueError('请设置有效的 HTTP 代理地址，例如 http://127.0.0.1:7897，须含端口且不含账号密码')
-    return value
+    return value if enabled else None
 
 
 def cli_environment(data, inherited):

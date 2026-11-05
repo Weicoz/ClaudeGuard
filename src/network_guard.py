@@ -2,25 +2,22 @@ import ipaddress
 import os
 import socket
 import subprocess
-import sys
 import time
+import json
+import stat
+import uuid
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-HOSTS_PATH = "/etc/hosts"
-BLOCK_HEADER = "# BEGIN CLAUDEGUARD BLOCKS\n"
-BLOCK_FOOTER = "# END CLAUDEGUARD BLOCKS\n"
-
-UPDATE_HEADER = "# BEGIN CLAUDEGUARD UPDATE BLOCKS\n"
-UPDATE_FOOTER = "# END CLAUDEGUARD UPDATE BLOCKS\n"
-
 # The user daemon has no root, and we no longer use sudo/sudoers. Instead it
-# stages the desired /etc/hosts + pf rule under this private dir and pokes a
-# trigger file; a root LaunchDaemon (com.claudeguard.helper) watches the trigger
-# and applies the vetted files. See hosts_helper.c and install.sh.
+# stages a structured request and pokes a trigger file. The root LaunchDaemon
+# validates it, merges current hosts and updates its own anchor.
+# See native/macos_network_helper.py and install.sh.
 CONFIG_DIR = os.path.expanduser("~/.config/claudeguard")
 PENDING_DIR = os.path.join(CONFIG_DIR, "pending")
-PENDING_HOSTS = os.path.join(PENDING_DIR, "hosts.tmp")
-PF_RULE_PATH = os.path.join(PENDING_DIR, "pf.rule")
+PENDING_REQUEST = os.path.join(PENDING_DIR, "request.json")
+HELPER_STATUS = "/Library/Application Support/ClaudeGuard/status.json"
+HELPER_BINARY = "/Library/Application Support/ClaudeGuard/hosts-helper"
 REQUEST_FILE = os.path.join(PENDING_DIR, "request")
 
 APEX_DOMAINS = [
@@ -158,141 +155,64 @@ def generate_all_subdomains():
     return sorted(list(domains))
 
 def sync_hosts_file(block_claude_domains, block_update_domains, config):
-    """Block/unblock all Claude & Anthropic subdomains via /etc/hosts and pf
-    (TCP + UDP QUIC)."""
+    """Submit one immutable request, serialize writers, require its root-owned receipt."""
+    from src.policy import atomic_json, locked
     try:
-        if not os.path.exists(HOSTS_PATH):
-            return False, "未找到 /etc/hosts 文件"
-
-        with open(HOSTS_PATH, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        content = remove_section(content, BLOCK_HEADER, BLOCK_FOOTER)
-        content = remove_section(content, UPDATE_HEADER, UPDATE_FOOTER)
-
-        all_blocked = sorted(list(set(generate_all_subdomains() + config.config.get("blocked_domains", []))))
-
-        new_blocks = ""
-        if block_claude_domains:
-            new_blocks += BLOCK_HEADER
-            for domain in all_blocked:
-                new_blocks += f"0.0.0.0\t{domain}\n"
-                new_blocks += f"127.0.0.1\t{domain}\n"
-                new_blocks += f"::1\t{domain}\n"
-            new_blocks += BLOCK_FOOTER
-
-        if block_update_domains:
-            new_blocks += UPDATE_HEADER
-            for domain in config.config.get("update_domains", []):
-                new_blocks += f"0.0.0.0\t{domain}\n"
-                new_blocks += f"127.0.0.1\t{domain}\n"
-                new_blocks += f"::1\t{domain}\n"
-            new_blocks += UPDATE_FOOTER
-
-        final_content = content.rstrip() + "\n\n" + new_blocks if new_blocks else content.rstrip() + "\n"
-
+        from native.macos_network_helper import domains
+        blocked_domains = domains(generate_all_subdomains() + config.config.get("blocked_domains", []))
+        updates = domains(config.config.get("update_domains", []))
         _ensure_pending()
-
-        # pf rule blocks TCP + UDP (UDP covers HTTP/3 QUIC) to the real server
-        # IPs. Using literal IPs (not domain names) is essential: pfctl would
-        # otherwise resolve the names through the just-poisoned /etc/hosts and
-        # build a table full of 0.0.0.0. Resolving via external DNS also means
-        # the block holds even when the browser uses DoH and skips /etc/hosts.
-        if block_claude_domains:
-            ip_set = set(resolve_domain_ips(PF_RESOLVE_DOMAINS))
-            # User-added custom domains are explicit intent — block whatever they
-            # resolve to, no Anthropic-range filter.
-            custom = config.config.get("blocked_domains", [])
-            if custom:
-                ip_set.update(resolve_ips(custom))
-            table_body = " ".join(sorted(ip_set))
-            pf_content = (
-                f"table <claude_guard> persist {{ {table_body} }}\n"
-                f"block drop out quick proto {{ tcp, udp }} to <claude_guard>\n"
-            )
-            with open(PF_RULE_PATH, "w", encoding="utf-8") as f:
-                f.write(pf_content)
-        else:
-            if os.path.exists(PF_RULE_PATH):
+        with locked(Path(PENDING_DIR) / "transaction.lock", timeout=30):
+            addresses = set()
+            if block_claude_domains:
+                addresses.update(resolve_domain_ips(PF_RESOLVE_DOMAINS))
+                custom = config.config.get("blocked_domains", [])
+                if custom:
+                    addresses.update(resolve_ips(custom))
+            request = {"schema": 2, "request_id": uuid.uuid4().hex,
+                       "block_claude_domains": bool(block_claude_domains),
+                       "block_update_domains": bool(block_update_domains),
+                       "claude_domains": blocked_domains, "update_domains": updates,
+                       "ip_addresses": sorted(addresses)}
+            atomic_json(PENDING_REQUEST, request)
+            fd = os.open(REQUEST_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("请求触发器必须是普通文件")
+                stream.write(request["request_id"])
+                stream.flush()
+                os.fsync(stream.fileno())
+            if os.geteuid() == 0:
+                uid = os.stat(CONFIG_DIR).st_uid
+                subprocess.run([HELPER_BINARY, CONFIG_DIR, str(uid)], check=True, timeout=30, capture_output=True)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
                 try:
-                    os.remove(PF_RULE_PATH)
-                except Exception:
+                    fd = os.open(HELPER_STATUS, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    try:
+                        info = os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 65536:
+                            raise ValueError("系统助手回执不可信")
+                        with os.fdopen(fd, encoding="utf-8") as stream:
+                            fd = None
+                            result = json.load(stream)
+                    finally:
+                        if fd is not None:
+                            os.close(fd)
+                    if result.get("schema") == 2 and result.get("request_id") == request["request_id"]:
+                        if result.get("ok") is not True or result.get("blocked") != request["block_claude_domains"] or result.get("updates_blocked") != request["block_update_domains"]:
+                            raise RuntimeError(result.get('error') or "系统助手未能应用请求")
+                        return True, "系统助手已确认域名和防火墙规则"
+                except FileNotFoundError:
                     pass
+                time.sleep(0.1)
+            raise TimeoutError("系统助手未确认请求；请升级或检查系统助手")
+    except Exception as error:
+        return False, f"网络拦截设置失败：{error}"
 
-        write_hosts(final_content)
-
-        return True, "域名拦截和防火墙规则已提交给系统网络助手"
-    except Exception as e:
-        return False, f"提交网络拦截设置失败：{e}"
-
-def remove_section(text, header, footer):
-    while header in text and footer in text:
-        start = text.find(header)
-        end = text.find(footer) + len(footer)
-        text = text[:start] + text[end:]
-    return text
 
 def _ensure_pending():
-    """The private staging dir the root helper reads from. 0700 + user-owned is
-    what lets the helper trust its contents (it applies only files owned by the
-    config dir's owner)."""
-    os.makedirs(PENDING_DIR, exist_ok=True)
-    try:
-        os.chmod(PENDING_DIR, 0o700)
-    except OSError:
-        pass
-
-def _atomic_write(path, content):
-    tmp = path + ".new"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def _apply_as_root():
-    """Direct application when we already are root (installed/run as root, or
-    tests). Mirrors what hosts_helper.c does."""
-    subprocess.run(f"cp '{PENDING_HOSTS}' {HOSTS_PATH} && chmod 644 {HOSTS_PATH}",
-                   shell=True, check=False)
-    subprocess.run("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder",
-                   shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if os.path.exists(PF_RULE_PATH):
-        subprocess.run(f"/sbin/pfctl -e -f '{PF_RULE_PATH}' && /sbin/pfctl -F states",
-                       shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    else:
-        subprocess.run("/sbin/pfctl -d; /sbin/pfctl -F states",
-                       shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-
-def write_hosts(content):
-    """Stage the desired /etc/hosts and signal the root helper to apply it.
-
-    No sudo, no sudoers: the LaunchDaemon com.claudeguard.helper watches the
-    trigger file and runs as root. When we already are root we just apply
-    directly."""
-    _ensure_pending()
-    _atomic_write(PENDING_HOSTS, content)
-
-    if os.geteuid() == 0:
-        _apply_as_root()
-        return
-
-    # Poke the trigger. Written in place (not renamed) so launchd's kqueue watch
-    # on this exact file survives across pokes.
-    with open(REQUEST_FILE, "w", encoding="utf-8") as f:
-        f.write(str(time.time()))
-        f.flush()
-        os.fsync(f.fileno())
-
-    # Best-effort confirm: the helper runs near-instantly, but block application
-    # is security-critical, so wait (up to ~3s) until /etc/hosts reflects the
-    # claude-block state we asked for.
-    want_block = BLOCK_HEADER in content
-    for _ in range(30):
-        try:
-            with open(HOSTS_PATH, "r", encoding="utf-8") as f:
-                if (BLOCK_HEADER in f.read()) == want_block:
-                    return
-        except OSError:
-            pass
-        time.sleep(0.1)
+    os.makedirs(PENDING_DIR, mode=0o700, exist_ok=True)
+    if os.path.islink(PENDING_DIR):
+        raise ValueError("pending 目录不得是符号链接")
+    os.chmod(PENDING_DIR, 0o700)

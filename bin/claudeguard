@@ -164,8 +164,6 @@ def main():
         print(f"检测方式已设为{mode_label(config.ip_check_mode)}，后台守护将在下一轮检测时采用新设置。")
 
     elif cmd == "check":
-        if not config.protection_enabled:
-            sys.exit(0)
         verdict, ip, err = get_verdict(config, timeout=2.0)
         sys.exit(0 if verdict == "allowed" else 1)
 
@@ -196,17 +194,30 @@ def main():
 
     elif cmd == "disable-protection":
         config.protection_enabled = False
-        sync_hosts_file(block_claude_domains=False, block_update_domains=config.block_auto_updates, config=config)
+        ok, message = sync_hosts_file(block_claude_domains=False, block_update_domains=config.block_auto_updates, config=config)
+        if not ok:
+            print(f"配置已保存，系统规则执行失败：{message}", file=sys.stderr)
+            sys.exit(1)
         print("🟡 防护已关闭。")
 
     elif cmd == "block-updates":
         config.block_auto_updates = True
-        apply_auto_update_lock(True)
+        ok, message = apply_auto_update_lock(True)
+        verdict, _, _ = get_verdict(config)
+        hosts_ok, hosts_message = sync_hosts_file(block_claude_domains=verdict != "allowed", block_update_domains=True, config=config)
+        if not ok or not hosts_ok:
+            print(f"配置已保存，系统执行失败：{message}；{hosts_message}", file=sys.stderr)
+            sys.exit(1)
         print("✅ 已禁止 Claude 自动更新。")
 
     elif cmd == "allow-updates":
         config.block_auto_updates = False
-        apply_auto_update_lock(False)
+        ok, message = apply_auto_update_lock(False)
+        verdict, _, _ = get_verdict(config)
+        hosts_ok, hosts_message = sync_hosts_file(block_claude_domains=verdict != "allowed", block_update_domains=False, config=config)
+        if not ok or not hosts_ok:
+            print(f"配置已保存，系统执行失败：{message}；{hosts_message}", file=sys.stderr)
+            sys.exit(1)
         print("🟢 已允许 Claude 自动更新。")
 
     elif cmd == "set-model":

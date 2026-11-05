@@ -162,6 +162,100 @@ _ = scored.evaluatePolicy(data: riskConfig, ips: ["http": good])
 precondition(abs(scored.cachedPolicyExpires.timeIntervalSince1970 - scored.fetched - 10) < 0.01, "Risk cache outlived its score TTL")
 let reused = scored.evaluatePolicy(data: riskConfig, ips: ["http": good])
 precondition((reused["scores"] as? [String: [String: Any]])?[good]?["cached"] as? Bool == true)
+class PartialRiskFailure: AppDelegate {
+    var calls = 0
+    override func runPolicy(action: String, request: [String: Any]) -> [String: Any] {
+        calls += 1
+        return ["state": "blocked", "reason": "未取得有效风险评分，暂不放行",
+                "scores": ["203.0.113.10": ["score": 10, "cached": true, "fetched_at": Date().timeIntervalSince1970]]]
+    }
+}
+let partial = PartialRiskFailure()
+partial.configPath = cacheDirectory.appendingPathComponent("partial/config.json").path
+for _ in 0..<2 { _ = partial.evaluatePolicy(data: ["access_mode": "risk"], ips: ["http": good, "stun": bad]) }
+precondition(partial.calls == 2, "Partial risk lookup failure was cached past the provider retry window")
+
+precondition(AppDelegate.isIPAllowed("2001:db8::1", allowedList: ["2001:db8::/32"]))
+precondition(AppDelegate.isIPAllowed("2001:db8::1", allowedList: ["2001:0db8:0000:0000:0000:0000:0000:0001"]))
+precondition(!AppDelegate.isIPAllowed("1.2.3.4", allowedList: ["1.bad.2.3.4/32"]))
+let transaction: [UInt8] = Array(0..<12)
+let packet: [UInt8] = [1,1,0,12,0x21,0x12,0xa4,0x42] + transaction + [0,1,0,8,0,1,1,0xbb,203,0,113,10]
+precondition(AppDelegate.parseStun(packet, transactionID: transaction) == good)
+precondition(AppDelegate.parseStun(packet, transactionID: Array(repeating: 0, count: 12)) == nil)
+precondition(AppDelegate.parseStun(Array(packet.dropLast()), transactionID: transaction) == nil)
+class EnforcementProbe: AppDelegate {
+    var succeeds = false
+    var hostCalls = 0
+    override func hostsDrifted() -> Bool { false }
+    override func killDesktopIfRunning() -> Bool { false }
+    override func helperSucceeded(_ cmd: String, _ a1: String, _ a2: String) -> Bool {
+        if cmd == "sync_hosts" { hostCalls += 1 }
+        return succeeds
+    }
+}
+let enforcement = EnforcementProbe()
+enforcement.eventLogPath = native.eventLogPath
+enforcement.apply(from: .offline, to: .allowed(ip: good))
+enforcement.apply(from: .offline, to: .allowed(ip: good))
+precondition(enforcement.hostCalls == 2 && !enforcement.enforcementConfirmed, "Failed system operation was cached as applied")
+enforcement.succeeds = true
+enforcement.apply(from: .offline, to: .allowed(ip: good))
+enforcement.apply(from: .offline, to: .allowed(ip: good))
+precondition(enforcement.hostCalls == 3 && enforcement.enforcementConfirmed, "Successful operations repeated at every poll")
+try! JSONSerialization.data(withJSONObject: ["protection_enabled": false, "allowed_ips": [good]]).write(to: URL(fileURLWithPath: native.configPath))
+native.loadConfig()
+precondition(native.configIsValid && !native.protectionEnabled)
+try! JSONSerialization.data(withJSONObject: ["protection_enabled": 0, "allowed_ips": [good]]).write(to: URL(fileURLWithPath: native.configPath))
+native.loadConfig()
+precondition(!native.configIsValid && native.protectionEnabled, "Numeric zero disabled protection")
+try! Data("{broken".utf8).write(to: URL(fileURLWithPath: native.configPath))
+native.loadConfig()
+precondition(!native.configIsValid && native.allowedIPs.isEmpty && native.protectionEnabled, "Corrupt config retained a previous allow")
+
+
+class TransactionProbe: EnforcementProbe {
+    var invalidateOnProbe = false
+    override func detectExits(mode: String) -> [String: String] {
+        if invalidateOnProbe { invalidateVerification(); invalidateOnProbe = false }
+        return ["http": "203.0.113.10"]
+    }
+}
+let transactionProbe = TransactionProbe()
+transactionProbe.configPath = cacheDirectory.appendingPathComponent("transaction.json").path
+transactionProbe.policyScriptPath = native.policyScriptPath
+transactionProbe.eventLogPath = native.eventLogPath
+transactionProbe.succeeds = true
+transactionProbe.headless = true
+try! Data("{broken".utf8).write(to: URL(fileURLWithPath: transactionProbe.configPath))
+transactionProbe.performCheck()
+precondition(!transactionProbe.recheckQueued, "A corrupt configuration caused an unbounded recheck loop")
+try! JSONSerialization.data(withJSONObject: ["allowed_ips": [good], "ip_check_mode": "http"]).write(to: URL(fileURLWithPath: transactionProbe.configPath))
+transactionProbe.invalidateOnProbe = true
+transactionProbe.performCheck()
+precondition(transactionProbe.state == .offline && !transactionProbe.enforcementConfirmed && transactionProbe.recheckQueued, "In-flight network change published a stale allow")
+transactionProbe.recheckQueued = false
+transactionProbe.performCheck()
+precondition(transactionProbe.state == .allowed(ip: good) && transactionProbe.enforcementConfirmed)
+let noisy = cacheDirectory.appendingPathComponent("large-policy.py")
+try! Data("import sys,json\njson.load(sys.stdin)\nprint(json.dumps({'valid':True,'padding':'x'*200000}))\n".utf8).write(to: noisy)
+transactionProbe.policyScriptPath = noisy.path
+let bridgeStart = Date()
+precondition(transactionProbe.runPolicy(action: "validate", request: ["data": [:]])["valid"] as? Bool == true)
+precondition(Date().timeIntervalSince(bridgeStart) < 5, "Policy pipe blocked before reading a large valid result")
+
+
+let fifo = cacheDirectory.appendingPathComponent("state-fifo")
+precondition(mkfifo(fifo.path, 0o600) == 0)
+let fifoStart = Date()
+precondition((try? native.boundedData(at: fifo)) == nil)
+precondition(Date().timeIntervalSince(fifoStart) < 0.5, "A named pipe blocked the guard")
+let settingsLock = AppDelegate()
+settingsLock.configPath = firstDaemon.configPath
+precondition(firstDaemon.acquireDaemonLock())
+precondition(settingsLock.acquireDaemonLock(name: "settings.lock"), "A running daemon blocked the settings window")
+close(settingsLock.daemonLockFD)
+close(firstDaemon.daemonLockFD)
+
 print("Swift both verdict matrix passed")
 '''
         with tempfile.TemporaryDirectory() as d:

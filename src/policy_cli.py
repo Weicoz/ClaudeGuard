@@ -15,12 +15,15 @@ if sys.platform == "win32":
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
-    parser.add_argument('action', choices=('evaluate', 'check', 'ack', 'ack-evaluate'))
+    parser.add_argument('action', choices=('validate', 'evaluate', 'check', 'ack', 'ack-evaluate'))
     args = parser.parse_args()
     try:
         request = json.load(sys.stdin)
         data = request['data']
-        if args.action in ('evaluate', 'ack-evaluate'):
+        if args.action == 'validate':
+            policy.settings(data)
+            result = {'valid': True}
+        elif args.action in ('evaluate', 'ack-evaluate'):
             result = policy.evaluate(data, request.get('ips', {}), args.config.parent, acknowledge=args.action == 'ack-evaluate', expected_ips=request.get('expected_ips'))
         else:
             result = policy.check(data, args.config.parent, acknowledge=args.action == 'ack', expected_ips=request.get('expected_ips'))

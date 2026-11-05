@@ -18,11 +18,15 @@ def main():
     if cmd == "sync_hosts":
         block_claude = sys.argv[2].lower() == "true" if len(sys.argv) > 2 else False
         block_updates = sys.argv[3].lower() == "true" if len(sys.argv) > 3 else True
-        sync_hosts_file(block_claude_domains=block_claude, block_update_domains=block_updates, config=config)
+        ok, message = sync_hosts_file(block_claude_domains=block_claude, block_update_domains=block_updates, config=config)
+        print(message, flush=True)
+        return 0 if ok else 1
 
     elif cmd == "sync_updates":
         block_updates = sys.argv[2].lower() == "true" if len(sys.argv) > 2 else True
-        apply_auto_update_lock(block_updates)
+        ok, message = apply_auto_update_lock(block_updates)
+        print(message, flush=True)
+        return 0 if ok else 1
 
     elif cmd == "integrity":
         # Called by the daemon on a timer; logs only real changes so the normal
@@ -32,4 +36,4 @@ def main():
             print(f"[ClaudeGuard] repaired: {change}", flush=True)
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
