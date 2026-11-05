@@ -250,6 +250,11 @@ def check(data, directory, acknowledge=False, expected_ips=None):
         ips = detect(data)
     except Exception as exc:
         if data.get('allow_unknown_ip'):
+            # 放行前仍尊重已锁存的跳变拦截
+            state = _load(Path(directory) / 'admission-state.json')
+            if data.get('detect_ip_change') and state.get('jump_latched'):
+                return {**_failure('检测到 IP 跳变，已持续拦截。请确认是否信任当前 IP'),
+                        'jump_latched': True, 'jump_details': state.get('jump_details', {})}
             return _failure('出口检测失败，按设置放行', state='allowed')
         return _failure('出口检测失败，暂不放行', str(exc))
     try:

@@ -52,6 +52,16 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.evaluate(data, {'http': B}, self.directory)['state'], 'allowed')
         self.assertEqual(policy.evaluate(data, {'http': '198.51.100.99'}, self.directory)['state'], 'blocked')
 
+    def test_probe_exception_respects_jump_latch(self):
+        data = {**self.data, 'allow_unknown_ip': True, 'detect_ip_change': True}
+        with patch.object(policy, 'detect', side_effect=OSError('boom')):
+            self.assertEqual(policy.check(data, self.directory)['state'], 'allowed')
+            policy.evaluate(data, {'http': A}, self.directory)
+            policy.evaluate(data, {'http': B}, self.directory)
+            result = policy.check(data, self.directory)
+            self.assertEqual(result['state'], 'blocked')
+            self.assertTrue(result['jump_latched'])
+
     def test_config_error_never_fails_open(self):
         data = {**self.data, 'allow_unknown_ip': True, 'access_mode': 'typo'}
         self.assertEqual(policy.check(data, self.directory)['state'], 'blocked')

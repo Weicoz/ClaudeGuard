@@ -37,6 +37,7 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   set-check-interval <1-60秒>        设置出口轮询间隔，建议 3 秒
   set-risk-cache-ttl <秒>            风险评分缓存有效期
   detect-ip-change <on|off>          开关 IP 跳变检测
+  allow-unknown-ip <on|off>          探测不到出口 IP 时是否放行
   ack-ip-change                     确认当前出口并解除跳变拦截
   set-ip-check-mode <both|http|stun>  选择检测方式
                        both：HTTP 和 STUN 都须通过，http/stun：只检查对应协议
@@ -88,6 +89,7 @@ def main():
             print("访问规则：" + ("风险评分" if config.config.get('access_mode') == 'risk' else "IP 白名单"))
             print(f"风险分阈值：{config.config.get('risk_threshold', 50)}，评分缓存：{config.config.get('risk_cache_ttl', 21600)} 秒")
             print("IP 跳变检测：" + ("已开启" if config.config.get('detect_ip_change') else "已关闭"))
+            print("无法检测到 IP 时：" + ("放行" if config.config.get('allow_unknown_ip') else "拦截"))
         up = daemon_is_up()
         print(f"判定来源： {'本次策略检查（复用有效评分缓存）' if policy.advanced(config.config) else ('🧠 后台守护' if up else '🔌 本次检测（后台守护未运行）')}")
         print("\n正在检测出口 IP…" if not up else "")
@@ -113,17 +115,18 @@ def main():
         if err:
             print(f"原因： {err}")
 
-    elif cmd in ("set-access-mode", "set-risk-threshold", "set-risk-cache-ttl", "detect-ip-change", "set-check-interval"):
+    elif cmd in ("set-access-mode", "set-risk-threshold", "set-risk-cache-ttl", "detect-ip-change", "allow-unknown-ip", "set-check-interval"):
         if len(sys.argv) != 3:
             print("请提供设置值，运行 claudeguard 查看用法。")
             sys.exit(1)
         key = {"set-access-mode": "access_mode", "set-risk-threshold": "risk_threshold",
-               "set-check-interval": "check_interval", "set-risk-cache-ttl": "risk_cache_ttl", "detect-ip-change": "detect_ip_change"}[cmd]
+               "set-check-interval": "check_interval", "set-risk-cache-ttl": "risk_cache_ttl",
+               "detect-ip-change": "detect_ip_change", "allow-unknown-ip": "allow_unknown_ip"}[cmd]
         try:
             value = sys.argv[2]
             if key in ("risk_threshold", "risk_cache_ttl", "check_interval"):
                 value = float(value)
-            if key == "detect_ip_change":
+            if key in ("detect_ip_change", "allow_unknown_ip"):
                 if value not in ("on", "off"):
                     raise ValueError("请填写 on 或 off")
                 value = value == "on"

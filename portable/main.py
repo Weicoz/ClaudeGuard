@@ -27,7 +27,7 @@ def main():
     for name in ("gui", "daemon", "start", "stop", "status", "check"):
         sub.add_parser(name)
     edit = sub.add_parser("set", help="修改配置")
-    edit.add_argument("key", choices=("ip_check_mode", "cli_path", "desktop_path", "http_proxy", "check_interval", "cli_http_proxy_enabled", "network_guard_enabled", "protection_enabled", "access_mode", "risk_threshold", "risk_cache_ttl", "detect_ip_change"))
+    edit.add_argument("key", choices=("ip_check_mode", "cli_path", "desktop_path", "http_proxy", "check_interval", "cli_http_proxy_enabled", "network_guard_enabled", "protection_enabled", "access_mode", "risk_threshold", "risk_cache_ttl", "detect_ip_change", "allow_unknown_ip"))
     edit.add_argument("value")
     for name in ("add-ip", "remove-ip"):
         sub.add_parser(name).add_argument("ip")
