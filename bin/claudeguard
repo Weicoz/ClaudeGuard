@@ -248,7 +248,10 @@ def main():
         subprocess.run(["launchctl", "load", plist], capture_output=True)
         if not daemon_is_up():
             subprocess.Popen([app_path, "--daemon"])
-        print("🚀 已请求启动 ClaudeGuard 后台守护。")
+        menu_plist = os.path.expanduser("~/Library/LaunchAgents/com.claudeguard.menubar.plist")
+        subprocess.run(["launchctl", "load", menu_plist], capture_output=True)
+        subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/com.claudeguard.menubar"], capture_output=True)
+        print("🚀 已请求启动 ClaudeGuard 后台守护和菜单栏。")
 
     elif cmd == "settings":
         app_path = os.path.join(PROJECT_DIR, "bin", "ClaudeGuardMenuBar")
@@ -257,6 +260,8 @@ def main():
     elif cmd in ("stop", "quit", "close"):
         plist = os.path.expanduser("~/Library/LaunchAgents/com.claudeguard.daemon.plist")
         subprocess.run(["launchctl", "unload", plist], capture_output=True)
+        menu_plist = os.path.expanduser("~/Library/LaunchAgents/com.claudeguard.menubar.plist")
+        subprocess.run(["launchctl", "unload", menu_plist], capture_output=True)
         subprocess.run(["pkill", "-f", r"/ClaudeGuardMenuBar( |$)"], check=False)
         print("🛑 后台守护已停止，已有网络限制不会自动解除。")
 

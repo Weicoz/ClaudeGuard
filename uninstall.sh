@@ -2,15 +2,19 @@
 set -euo pipefail
 INSTALL_DIR="$HOME/.local/share/ClaudeGuard"
 PLIST_PATH="$HOME/Library/LaunchAgents/com.claudeguard.daemon.plist"
+MENU_PLIST_PATH="$HOME/Library/LaunchAgents/com.claudeguard.menubar.plist"
 HELPER_SYS_DIR="/Library/Application Support/ClaudeGuard"
 HELPER_PLIST="/Library/LaunchDaemons/com.claudeguard.helper.plist"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Stop the guard before clearing its rules; restart it if cleanup fails.
+# Stop both user services before clearing rules; restore them if cleanup fails.
+if [ -f "$MENU_PLIST_PATH" ]; then
+    launchctl bootout "gui/$(id -u)/com.claudeguard.menubar" 2>/dev/null || true
+fi
 if [ -f "$PLIST_PATH" ]; then
     launchctl bootout "gui/$(id -u)/com.claudeguard.daemon" 2>/dev/null || true
 fi
-trap 'if [ -f "$PLIST_PATH" ]; then launchctl load "$PLIST_PATH" 2>/dev/null || true; fi' ERR
+trap 'for p in "$PLIST_PATH" "$MENU_PLIST_PATH"; do if [ -f "$p" ]; then launchctl load "$p" 2>/dev/null || true; fi; done' ERR
 (cd "$SOURCE_DIR" && /usr/bin/python3 - <<'PY'
 import os
 from src.config import ConfigManager
@@ -41,7 +45,7 @@ sudo launchctl bootout system "$HELPER_PLIST" 2>/dev/null || true
 sudo rm -f "$HELPER_PLIST" "$HELPER_SYS_DIR/hosts-helper" "$HELPER_SYS_DIR/macos_network_helper.py" \
     "$HELPER_SYS_DIR/status.json" "$HELPER_SYS_DIR/apply.lock" "$HELPER_SYS_DIR/pf-token"
 sudo rmdir "$HELPER_SYS_DIR" 2>/dev/null || true
-rm -f "$PLIST_PATH"
+rm -f "$PLIST_PATH" "$MENU_PLIST_PATH"
 rm -rf "$INSTALL_DIR"
 trap - ERR
 printf '%s\n' 'ClaudeGuard 已卸载。配置、窗口历史及备份已保留；仅清理专属网络规则。'

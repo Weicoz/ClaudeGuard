@@ -73,7 +73,7 @@ Either way it compiles for Apple Silicon (arm64), installs the lightweight backg
 and wraps the `claude` command. It asks for your password once (`sudo` is needed to edit `/etc/hosts` and pf)
 and offers to whitelist your current IP - accept **only if you are on your VPN right now.**
 
-The shield menu now opens on demand through `ClaudeGuard.app` or `claudeguard settings` and exits when dismissed. The background guard keeps monitoring without a resident AppKit application.
+The shield stays in the menu bar at login. Click it, open `ClaudeGuard.app`, or run `claudeguard settings` to open its menu; dismissing the menu keeps the icon visible. The background guard runs independently.
 
 **Uninstall:**
 
@@ -100,7 +100,7 @@ After install the `claudeguard` command is available:
 | `claudeguard enable-model` / `disable-model` | Turn the model override on / off |
 | `claudeguard launch-desktop` | Launch Claude Desktop with a pre-flight check |
 | `claudeguard start` / `stop` | Start / stop the background daemon |
-| `claudeguard settings` | Open settings on demand; dismissing the menu leaves protection running |
+| `claudeguard settings` | Open the resident menu; dismissing it keeps the icon and protection running |
 | `claudeguard doctor` | Check every hook is still attached, and re-attach it |
 | `claudeguard set-cli-path <path>` | Point at the real `claude` binary if auto-detect misses it |
 
@@ -138,7 +138,7 @@ src/
   integrity.py      Finds Claude's real paths; re-attaches hooks after a reinstall
   cli_wrapper.py    Pre-flight interceptor for the `claude` command
   app_launcher.py   Pre-flight interceptor for Claude.app
-  main.swift        Native background guard + on-demand AppKit settings and alerts
+  main.swift        Native background guard + resident AppKit menu and alerts
   hosts_helper.c    Root helper run by a LaunchDaemon (no sudoers, no setuid); writes /etc/hosts + pf
 bin/claudeguard     Management CLI
 assets/AppIcon.png  App icon

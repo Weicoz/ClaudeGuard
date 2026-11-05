@@ -68,7 +68,7 @@ read -r _
 仅支持 Apple Silicon，程序已预编译。无需联网下载项目源码。
 
 双击 Install ClaudeGuard.command 安装。系统网络助手需要管理员密码，由你输入。
-这不是拖拽即用的独立 App；安装后通过 ClaudeGuard.app 或 claudeguard settings 打开设置。
+这不是拖拽即用的独立 App；安装后菜单栏盾牌常驻显示，也可通过 ClaudeGuard.app 或 claudeguard settings 打开菜单。
 Claude-W 功能入口：claudeguard window --help。新安装的自动请求任务默认禁用。
 已有历史和计划保留；已有启用的旧任务保持原状态。
 

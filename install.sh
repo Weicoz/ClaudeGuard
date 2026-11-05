@@ -21,6 +21,7 @@ BRANCH="${CLAUDEGUARD_BRANCH:-main}"
 INSTALL_DIR="$HOME/.local/share/ClaudeGuard"
 APP_BUNDLE="$INSTALL_DIR/ClaudeGuard.app"
 PLIST_PATH="$HOME/Library/LaunchAgents/com.claudeguard.daemon.plist"
+MENU_PLIST_PATH="$HOME/Library/LaunchAgents/com.claudeguard.menubar.plist"
 CONFIG_DIR="$HOME/.config/claudeguard"
 # Root privileged-helper: a LaunchDaemon (no sudoers, no setuid). The binary
 # lives in a root-owned dir so it can't be swapped, and it runs only when the
@@ -137,6 +138,9 @@ else
     clang -O2 "$SOURCE_DIR/src/hosts_helper.c" -o "$BUILD_TMP/hosts-helper"
     swiftc -O "$SOURCE_DIR/src/main.swift" -o "$BUILD_TMP/ClaudeGuardMenuBar"
 fi
+if [ -f "$MENU_PLIST_PATH" ]; then
+    launchctl bootout "gui/$(id -u)/com.claudeguard.menubar" 2>/dev/null || true
+fi
 if [ -f "$PLIST_PATH" ]; then
     launchctl bootout "gui/$(id -u)/com.claudeguard.daemon" 2>/dev/null || true
 fi
@@ -247,15 +251,22 @@ fi
 # --- 6. LaunchAgent (autostart at login) ------------------------------------
 info "Registering login-autostart LaunchAgent…"
 mkdir -p "$HOME/Library/LaunchAgents"
-/usr/bin/python3 - "$PLIST_PATH" "$INSTALL_DIR" <<'PYPLIST'
+/usr/bin/python3 - "$PLIST_PATH" "$INSTALL_DIR" "$MENU_PLIST_PATH" <<'PYPLIST'
 import os, plistlib, sys
-path, install = sys.argv[1:]
+path, install, menu_path = sys.argv[1:]
 with open(path, 'wb') as stream:
     plistlib.dump({'Label': 'com.claudeguard.daemon',
                   'ProgramArguments': [install + '/bin/ClaudeGuardMenuBar', '--daemon'],
                   'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False},
                   'StandardOutPath': os.path.expanduser('~/Library/Logs/ClaudeGuard/daemon.log'),
                   'StandardErrorPath': os.path.expanduser('~/Library/Logs/ClaudeGuard/daemon.err')}, stream)
+with open(menu_path, 'wb') as stream:
+    plistlib.dump({'Label': 'com.claudeguard.menubar',
+                  'ProgramArguments': [install + '/ClaudeGuard.app/Contents/MacOS/ClaudeGuardMenuBar', '--menu-bar'],
+                  'RunAtLoad': True, 'KeepAlive': {'SuccessfulExit': False},
+                  'ProcessType': 'Interactive',
+                  'StandardOutPath': os.path.expanduser('~/Library/Logs/ClaudeGuard/menu.log'),
+                  'StandardErrorPath': os.path.expanduser('~/Library/Logs/ClaudeGuard/menu.err')}, stream)
 PYPLIST
 
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
@@ -326,6 +337,7 @@ fi
 # The compiled copy in the user dir is never executed now; drop it.
 rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
+launchctl load "$MENU_PLIST_PATH"
 
 # --- 8. First-run: offer to whitelist the current public IP -----------------
 # Best done while you're connected to your VPN right now.
@@ -341,7 +353,7 @@ if [ -n "$CUR_IP" ] && [ -r /dev/tty ]; then
 fi
 
 printf '\n%s\n' "${GRN}${BOLD}🎉 ClaudeGuard installed & running.${RST}"
-printf '%s\n' "   Protection runs without a menu bar process. Open ClaudeGuard.app or run 'claudeguard settings' to change settings."
+printf '%s\n' "   The menu bar shield stays visible at login; dismissing the menu keeps it running. The guard runs independently."
 printf '%s\n' "   ${DIM}Manage it:${RST} ${BOLD}claudeguard status${RST}  ·  ${BOLD}claudeguard add-ip <IP>${RST}"
 if ! printf '%s' "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
     printf '%s\n' "   ${YLW}Note:${RST} add ~/.local/bin to your PATH to use 'claudeguard' directly:"

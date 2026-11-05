@@ -1,6 +1,6 @@
 # ClaudeGuard 中文版
 
-ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护检测出口，设置菜单按需打开。它检查当前公网出口是否在你设置的白名单中，通过后才允许启动 Claude 桌面端或 Claude Code。检测到出口不符合要求时，会关闭对应会话，并阻断相关域名的连接。
+ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护检测出口，菜单栏盾牌常驻显示。它检查当前公网出口是否在你设置的白名单中，通过后才允许启动 Claude 桌面端或 Claude Code。检测到出口不符合要求时，会关闭对应会话，并阻断相关域名的连接。
 
 本项目基于 [ivblz/ClaudeGuard](https://github.com/ivblz/ClaudeGuard) 修改，增加了可选择的出口检测方式，并将菜单、弹窗和命令行提示改为中文。保留原项目的 MIT 许可证。
 
@@ -32,7 +32,7 @@ cd ClaudeGuard
 ./install.sh
 ```
 
-安装后，后台防护会在登录 macOS 后自动启动，不保留常驻菜单栏进程。运行 `claudeguard settings` 或打开 `ClaudeGuard.app`，即可查看状态、管理白名单、切换检测方式。关闭设置菜单后，界面进程自动退出，后台防护继续运行。
+安装后，后台防护和菜单栏盾牌会在登录 macOS 后自动启动。点击盾牌、运行 `claudeguard settings` 或打开 `ClaudeGuard.app`，即可查看状态、管理白名单、切换检测方式。关闭菜单后图标保持显示，后台防护独立运行。
 
 第一次安装时，如果询问是否将当前 IP 加入白名单，请先确认它就是你希望允许使用的出口。也可以跳过，之后手动添加：
 

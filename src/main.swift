@@ -3,7 +3,7 @@ import Foundation
 import SystemConfiguration
 import Network
 
-// ClaudeGuard background guard; AppKit settings and alerts open on demand.
+// ClaudeGuard background guard with a separate resident AppKit menu bar.
 //
 // State machine: compute one GuardState, touch the system only on transitions
 // (blocking/unblocking domains, killing the app, alerting) — never on every
@@ -62,10 +62,11 @@ class ProbeHTTPDelegate: NSObject, URLSessionDataDelegate {
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var headless = false
     var settingsOnly = false
-    var alertOnly = false
     var settingsBusy = false
+    var alertOnly = false
     var daemonLockFD: Int32 = -1
     static let recheckNotification = Notification.Name("com.claudeguard.recheck")
+    static let openSettingsNotification = Notification.Name("com.claudeguard.open-settings")
     var statusItem: NSStatusItem!
     var menu: NSMenu!
 
@@ -187,6 +188,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // Settings and the headless guard hold different locks.
         guard acquireDaemonLock(name: "settings.lock") else {
+            if !CommandLine.arguments.contains("--menu-bar") {
+                DistributedNotificationCenter.default().postNotificationName(Self.openSettingsNotification, object: String(getuid()), userInfo: nil, deliverImmediately: true)
+            }
             NSApplication.shared.terminate(nil)
             return
         }
@@ -200,6 +204,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        DistributedNotificationCenter.default().addObserver(forName: Self.openSettingsNotification, object: String(getuid()), queue: .main) { [weak self] _ in
+            self?.statusItem.button?.performClick(nil)
+        }
 
         loadConfig()
         if settingsOnly {
@@ -217,11 +224,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try? daemon.run()
             }
             refreshSettingsState()
-            Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshSettingsState() }
-            DispatchQueue.main.async { self.statusItem.button?.performClick(nil) }
+            let timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refreshSettingsState() }
+            timer.tolerance = 0.25
+            if !CommandLine.arguments.contains("--menu-bar") {
+                DispatchQueue.main.async { self.statusItem.button?.performClick(nil) }
+            }
             return
         }
         startGuard()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        statusItem?.button?.performClick(nil)
+        return false
     }
 
     func acquireDaemonLock(name: String = "daemon.lock") -> Bool {
@@ -1130,19 +1145,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) { rebuildMenu() }
-
-    func menuDidClose(_ menu: NSMenu) {
-        guard settingsOnly, menu === self.menu else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.closeSettingsWhenIdle() }
-    }
-
-    func closeSettingsWhenIdle() {
-        if settingsBusy || NSApp.modalWindow != nil {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.closeSettingsWhenIdle() }
-        } else {
-            NSApp.terminate(nil)
-        }
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if settingsOnly { refreshSettingsState() }
+        rebuildMenu()
     }
 
     func refreshSettingsState() {
@@ -1330,7 +1335,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: settingsOnly ? "关闭设置（防护继续运行）" : "退出 ClaudeGuard", action: #selector(onQuit), keyEquivalent: "")
+        let quit = NSMenuItem(title: settingsOnly ? "退出菜单栏（防护继续运行）" : "退出 ClaudeGuard", action: #selector(onQuit), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
     }
