@@ -69,9 +69,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/ma
 ./install.sh
 ```
 
-Either way it compiles for your architecture (Apple Silicon or Intel), installs the menu bar daemon at login,
+Either way it compiles for your architecture (Apple Silicon or Intel), installs the lightweight background daemon at login,
 and wraps the `claude` command. It asks for your password once (`sudo` is needed to edit `/etc/hosts` and pf)
 and offers to whitelist your current IP - accept **only if you are on your VPN right now.**
+
+The shield menu now opens on demand through `ClaudeGuard.app` or `claudeguard settings` and exits when dismissed. The background guard keeps monitoring without a resident AppKit application.
 
 **Uninstall:**
 
@@ -80,6 +82,8 @@ and offers to whitelist your current IP - accept **only if you are on your VPN r
 ```
 
 ## CLI
+
+Claude-W window management is integrated under `claudeguard window`; see [integration details](docs/claude-w.md). New scheduled-request installations are disabled by default. Universal macOS DMG builds and signing limitations are documented in [macOS releases](docs/release-macos.md).
 
 After install the `claudeguard` command is available:
 
@@ -95,7 +99,8 @@ After install the `claudeguard` command is available:
 | `claudeguard set-model <model>` | Set the default model (e.g. `claude-opus-4-8`) |
 | `claudeguard enable-model` / `disable-model` | Turn the model override on / off |
 | `claudeguard launch-desktop` | Launch Claude Desktop with a pre-flight check |
-| `claudeguard start` / `stop` | Start / stop the menu bar daemon |
+| `claudeguard start` / `stop` | Start / stop the background daemon |
+| `claudeguard settings` | Open settings on demand; dismissing the menu leaves protection running |
 | `claudeguard doctor` | Check every hook is still attached, and re-attach it |
 | `claudeguard set-cli-path <path>` | Point at the real `claude` binary if auto-detect misses it |
 
@@ -116,7 +121,7 @@ it immediately) at any time.
 
 1. **Selectable IP detection** - `http` queries only HTTP services, `stun` queries only UDP STUN. The default `both` checks HTTP and STUN independently and allows access only when both exits are whitelisted, regardless of response order. Legacy `auto` configurations are treated as `both`.
 2. **The brain** (`src/brain.py`) turns that IP into one verdict - `allowed` / `blocked` / `offline` - and it **fails closed**: only a confirmed `allowed` lets Claude run.
-3. **Single source of truth** - the menu bar daemon writes its verdict to `~/.config/claudeguard/state.json` on every check. The CLI wrapper and app launcher read it (instant), and fall back to their own check if the daemon is down, its state is stale, or its detection mode / whitelist differs from the current configuration.
+3. **Single source of truth** - the background daemon writes its verdict to `~/.config/claudeguard/state.json` on every check. The CLI wrapper and app launcher read it (instant), and fall back to their own check if the daemon is down, its state is stale, or its detection mode / whitelist differs from the current configuration.
 4. **Enforcement** - the whole Claude/Anthropic domain family (~175 hosts across 5 apex domains) is blocked via `/etc/hosts` + a pf firewall rule (TCP + UDP/QUIC); the desktop app is force-quit with an alert; a running `claude` session is killed the moment the IP leaves the whitelist.
 
 > **Scope:** this is accidental-leak protection for your own machine, not a defense against a malicious admin. The truly unbypassable layer (a Network Extension content filter) requires a paid Apple Developer account; the on-device approach here is the free ceiling and covers accidental leaks well.
@@ -133,7 +138,7 @@ src/
   integrity.py      Finds Claude's real paths; re-attaches hooks after a reinstall
   cli_wrapper.py    Pre-flight interceptor for the `claude` command
   app_launcher.py   Pre-flight interceptor for Claude.app
-  main.swift        Native menu bar daemon (AppKit): monitoring, alerts, state file
+  main.swift        Native background guard + on-demand AppKit settings and alerts
   hosts_helper.c    Root helper run by a LaunchDaemon (no sudoers, no setuid); writes /etc/hosts + pf
 bin/claudeguard     Management CLI
 assets/AppIcon.png  App icon

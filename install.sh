@@ -81,10 +81,12 @@ if [ -z "$SOURCE_DIR" ] || [ ! -f "$SOURCE_DIR/src/main.swift" ]; then
 fi
 
 LOGO_PNG="$SOURCE_DIR/assets/AppIcon.png"
+APP_VERSION="$(cat "$SOURCE_DIR/VERSION" 2>/dev/null || echo '0.1.0')"
+APP_SHORT_VERSION="${APP_VERSION%%-*}"
 
 # --- Prerequisite: Xcode Command Line Tools (clang + swiftc) ----------------
 # Required to compile on-device. If missing, launch Apple's installer and wait.
-if ! have clang || ! have swiftc; then
+if [ ! -f "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" ] && { ! have clang || ! have swiftc; }; then
     warn "Xcode Command Line Tools required (clang + swiftc)."
     info "Launching Apple's installer — click ${BOLD}Install${RST} in the popup."
     xcode-select --install >/dev/null 2>&1 || true
@@ -107,12 +109,22 @@ done
 # --- 2. Compile the native binaries -----------------------------------------
 # A previous install may have left a root-owned setuid hosts-helper behind; as a
 # regular user we can only remove-then-recreate (dir write perm governs unlink).
-info "Compiling privileged hosts helper (C)…"
-rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || sudo rm -f "$INSTALL_DIR/bin/hosts-helper"
-clang -O2 "$SOURCE_DIR/src/hosts_helper.c" -o "$INSTALL_DIR/bin/hosts-helper"
-
-info "Compiling native menu bar app (Swift)…"
-swiftc -O "$SOURCE_DIR/src/main.swift" -o "$INSTALL_DIR/bin/ClaudeGuardMenuBar"
+if [ -f "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" ] && [ -f "$SOURCE_DIR/prebuilt/hosts-helper" ]; then
+    info "Installing precompiled macOS binaries…"
+    /usr/bin/lipo "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" -verify_arch "$(uname -m)"
+    /usr/bin/lipo "$SOURCE_DIR/prebuilt/hosts-helper" -verify_arch "$(uname -m)"
+    cp "$SOURCE_DIR/prebuilt/ClaudeGuardMenuBar" "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new"
+    mv -f "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new" "$INSTALL_DIR/bin/ClaudeGuardMenuBar"
+    rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || sudo rm -f "$INSTALL_DIR/bin/hosts-helper"
+    cp "$SOURCE_DIR/prebuilt/hosts-helper" "$INSTALL_DIR/bin/hosts-helper"
+else
+    info "Compiling privileged hosts helper (C)…"
+    rm -f "$INSTALL_DIR/bin/hosts-helper" 2>/dev/null || sudo rm -f "$INSTALL_DIR/bin/hosts-helper"
+    clang -O2 "$SOURCE_DIR/src/hosts_helper.c" -o "$INSTALL_DIR/bin/hosts-helper"
+    info "Compiling native menu bar app (Swift)…"
+    swiftc -O "$SOURCE_DIR/src/main.swift" -o "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new"
+    mv -f "$INSTALL_DIR/bin/.ClaudeGuardMenuBar.new" "$INSTALL_DIR/bin/ClaudeGuardMenuBar"
+fi
 
 chmod +x "$INSTALL_DIR/bin/claudeguard" "$INSTALL_DIR/bin/ClaudeGuardMenuBar" \
          "$INSTALL_DIR/src/cli_wrapper.py" "$INSTALL_DIR/src/app_launcher.py" \
@@ -123,7 +135,8 @@ info "Creating ClaudeGuard.app bundle…"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 
 if [ -f "$LOGO_PNG" ]; then
-    ICONSET_DIR="/tmp/AppIcon.iconset"; rm -rf "$ICONSET_DIR"; mkdir -p "$ICONSET_DIR"
+    ICON_TMP="$(mktemp -d)"
+    ICONSET_DIR="$ICON_TMP/AppIcon.iconset"; mkdir -p "$ICONSET_DIR"
     for pair in "16:icon_16x16" "32:icon_16x16@2x" "32:icon_32x32" "64:icon_32x32@2x" \
                 "128:icon_128x128" "256:icon_128x128@2x" "256:icon_256x256" \
                 "512:icon_256x256@2x" "512:icon_512x512" "1024:icon_512x512@2x"; do
@@ -131,12 +144,12 @@ if [ -f "$LOGO_PNG" ]; then
         sips -z "$sz" "$sz" "$LOGO_PNG" --out "$ICONSET_DIR/$nm.png" >/dev/null 2>&1
     done
     iconutil -c icns "$ICONSET_DIR" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    rm -rf "$ICONSET_DIR"
+    rm -rf "$ICON_TMP"
 else
     warn "assets/AppIcon.png not found — bundle will use the default icon."
 fi
 
-cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
+cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -145,6 +158,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'EOF'
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>com.claudeguard.app</string>
     <key>CFBundleName</key><string>ClaudeGuard</string>
+    <key>CFBundleShortVersionString</key><string>$APP_SHORT_VERSION</string>
+    <key>CFBundleVersion</key><string>$APP_SHORT_VERSION</string>
+    <key>CFBundleGetInfoString</key><string>ClaudeGuard $APP_VERSION</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSUIElement</key><true/>
 </dict>
@@ -160,6 +176,10 @@ info "Installing the 'claudeguard' manager…"
 mkdir -p "$HOME/.local/bin" "$CONFIG_DIR"
 ln -sf "$INSTALL_DIR/bin/claudeguard" "$HOME/.local/bin/claudeguard"
 [ -w "/usr/local/bin" ] && ln -sf "$INSTALL_DIR/bin/claudeguard" "/usr/local/bin/claudeguard"
+
+# Window management keeps existing data and schedules; a fresh task stays disabled.
+chmod +x "$INSTALL_DIR/bin/claude-w"
+(cd "$INSTALL_DIR" && /usr/bin/python3 -m src.window_install)
 
 # --- 5. Hook the `claude` CLI + locate Claude Desktop ------------------------
 # Delegated to src/integrity.py, the same code the daemon runs on a timer, so a
@@ -200,7 +220,7 @@ cat > "$PLIST_PATH" <<EOF
 <dict>
     <key>Label</key><string>com.claudeguard.daemon</string>
     <key>ProgramArguments</key>
-    <array><string>$INSTALL_DIR/bin/ClaudeGuardMenuBar</string></array>
+    <array><string>$INSTALL_DIR/bin/ClaudeGuardMenuBar</string><string>--daemon</string></array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
     <key>StandardOutPath</key><string>/tmp/claudeguard.log</string>
@@ -208,7 +228,7 @@ cat > "$PLIST_PATH" <<EOF
 </dict>
 </plist>
 EOF
-pkill -f "ClaudeGuardMenuBar" 2>/dev/null || true
+pkill -f '/ClaudeGuardMenuBar( |$)' 2>/dev/null || true
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH" 2>/dev/null || true
 
@@ -279,7 +299,7 @@ if [ -n "$CUR_IP" ] && [ -r /dev/tty ]; then
 fi
 
 printf '\n%s\n' "${GRN}${BOLD}🎉 ClaudeGuard installed & running.${RST}"
-printf '%s\n' "   Look for the shield in your macOS menu bar."
+printf '%s\n' "   Protection runs without a menu bar process. Open ClaudeGuard.app or run 'claudeguard settings' to change settings."
 printf '%s\n' "   ${DIM}Manage it:${RST} ${BOLD}claudeguard status${RST}  ·  ${BOLD}claudeguard add-ip <IP>${RST}"
 if ! printf '%s' "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
     printf '%s\n' "   ${YLW}Note:${RST} add ~/.local/bin to your PATH to use 'claudeguard' directly:"

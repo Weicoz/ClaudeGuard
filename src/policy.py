@@ -4,6 +4,7 @@ The score adapter uses the same proxycheck.io v2 source as stormzhang/ipcheck.
 No ipcheck local-account diagnostics or source code are imported.
 """
 import contextlib
+import copy
 import hashlib
 import ipaddress
 import json
@@ -160,12 +161,14 @@ def evaluate(data, ips, directory, acknowledge=False, expected_ips=None, now=Non
         path = Path(directory) / 'admission-state.json'
         with locked(path.with_suffix('.lock')):
             state = _load(path)
+            original = copy.deepcopy(state)
             changed = {m: {'before': state['baseline'][m], 'after': ip} for m, ip in ips.items()
                        if m in state['baseline'] and state['baseline'][m] != ip}
             if data['detect_ip_change'] and changed and not acknowledge:
                 state['jump_latched'] = True
                 state['jump_details'] = changed
-                atomic_json(path, state)  # persist before doing any network risk lookup
+                if state != original:
+                    atomic_json(path, state)  # persist before doing any network risk lookup
             if data['detect_ip_change'] and state['jump_latched'] and not acknowledge:
                 return {**deny('检测到 IP 跳变，已持续拦截。请确认是否信任当前 IP'), 'jump_latched': True, 'jump_details': state.get('jump_details', {})}
             missing_modes = [m for m in modes if m not in ips]
@@ -222,7 +225,8 @@ def evaluate(data, ips, directory, acknowledge=False, expected_ips=None, now=Non
             if data['detect_ip_change'] and not missing_modes:
                 # Establish unseen transport baselines only after the whole rule passes.
                 state['baseline'].update(ips)
-            atomic_json(path, state)
+            if state != original:
+                atomic_json(path, state)
             if missing_modes:
                 missing = '、'.join(m.upper() for m in missing_modes)
                 return {**result, 'state': 'allowed', 'error': None,

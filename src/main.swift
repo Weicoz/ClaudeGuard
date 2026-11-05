@@ -3,7 +3,7 @@ import Foundation
 import SystemConfiguration
 import Network
 
-// ClaudeGuard menu bar daemon.
+// ClaudeGuard background guard; AppKit settings and alerts open on demand.
 //
 // State machine: compute one GuardState, touch the system only on transitions
 // (blocking/unblocking domains, killing the app, alerting) — never on every
@@ -26,7 +26,13 @@ enum GuardState: Equatable {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    var headless = false
+    var settingsOnly = false
+    var alertOnly = false
+    var settingsBusy = false
+    var daemonLockFD: Int32 = -1
+    static let recheckNotification = Notification.Name("com.claudeguard.recheck")
     var statusItem: NSStatusItem!
     var menu: NSMenu!
 
@@ -77,6 +83,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     var jumpBlocked = false
+    var cachedPolicyRequest: Data?
+    var cachedPolicyState: Data?
+    var cachedPolicyOutcome: [String: Any]?
+    var cachedPolicyExpires = Date.distantPast
+    var cachedPolicyCreated = Date.distantFuture
+    var lastIntegritySignature: [String]?
+    var integrityRunning = false
     var pollTimer: Timer?
     var scheduledPollInterval: Double = 0
 
@@ -104,6 +117,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var hasNetworkPath: Bool = true
     var blinkTimer: Timer?
     var blinkState: Bool = false
+    var displayedSymbol: String?
     // Serialize + coalesce rechecks. A plain "drop if busy" lock loses the
     // network event that arrives mid-check — the classic cause of a boot (or a
     // VPN handoff) that latches on offline/blocked until a reboot. Instead:
@@ -124,6 +138,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if alertOnly {
+            showBlockedAlert(reason: CommandLine.arguments.last ?? "出口未通过检查")
+            return
+        }
         // Single-instance guard. LaunchAgent runs the bare binary, Launchpad
         // runs the .app — match both names and the bundle id.
         let myPID = getpid()
@@ -142,11 +160,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menu = NSMenu()
+        menu.delegate = self
         statusItem.menu = menu
 
         loadConfig()
+        if settingsOnly {
+            let agent = Process()
+            agent.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            agent.arguments = ["kickstart", "gui/\(getuid())/com.claudeguard.daemon"]
+            agent.standardOutput = FileHandle.nullDevice
+            agent.standardError = FileHandle.nullDevice
+            var started = false
+            do { try agent.run(); agent.waitUntilExit(); started = agent.terminationStatus == 0 } catch {}
+            if !started {
+                let daemon = Process()
+                daemon.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                daemon.arguments = ["--daemon"]
+                try? daemon.run()
+            }
+            refreshSettingsState()
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refreshSettingsState() }
+            DispatchQueue.main.async { self.statusItem.button?.performClick(nil) }
+            return
+        }
+        startGuard()
+    }
+
+    func acquireDaemonLock() -> Bool {
+        let directory = URL(fileURLWithPath: configPath).deletingLastPathComponent()
+        do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } catch { return false }
+        daemonLockFD = open(directory.appendingPathComponent("daemon.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard daemonLockFD >= 0 else { return false }
+        if flock(daemonLockFD, LOCK_EX | LOCK_NB) == 0 { return true }
+        close(daemonLockFD)
+        daemonLockFD = -1
+        return false
+    }
+
+    func startGuard() {
+        loadConfig()
         logEvent("guard_started", fields: ["mode": ipCheckMode, "check_interval": checkInterval])
-        rebuildMenu()
+        if !headless { rebuildMenu() }
 
         setupAppLaunchInterceptor()
 
@@ -155,6 +209,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPathMonitor()      // connectivity up/down
         setupNetworkObserver()  // VPN/route/IP changes while online
         setupWakeObserver()     // re-verify after the Mac wakes from sleep
+        DistributedNotificationCenter.default().addObserver(forName: Self.recheckNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.recheckAsync()
+        }
 
         startBlinking()
         DispatchQueue.global(qos: .userInitiated).async { self.recheck() }
@@ -175,6 +232,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func configurePolling() {
+        guard !settingsOnly else { return }
         let interval = checkInterval
         guard pollTimer == nil || scheduledPollInterval != interval else { return }
         pollTimer?.invalidate()
@@ -192,7 +250,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func runIntegrityRepair() {
-        runHelper("integrity", "", "")
+        // shortcut: new installs outside watched paths need doctor; add Spotlight events if this becomes common.
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let paths = [configPath, home + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+                     home + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin",
+                     home + "/.local/share/claude/versions", "/opt/homebrew/Caskroom/claude-code", "/usr/local/Caskroom/claude-code",
+                     "/Applications", home + "/Applications",
+                     policyConfig["real_claude_cli_path"] as? String ?? "", policyConfig["real_claude_app_path"] as? String ?? ""]
+        let signature = paths.map { path -> String in
+            let attributes = (try? FileManager.default.attributesOfItem(atPath: path)) ?? [:]
+            let target = (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) ?? ""
+            return "\(path):\(attributes[.modificationDate] ?? "missing"):\(attributes[.systemFileNumber] ?? "missing"):\(attributes[.posixPermissions] ?? "missing"):\(target)"
+        }
+        guard signature != lastIntegritySignature, !integrityRunning else { return }
+        integrityRunning = true
+        defer { integrityRunning = false }
+        if let task = runHelper("integrity", "", "") {
+            task.waitUntilExit()
+            if task.terminationStatus == 0 { lastIntegritySignature = signature }
+        }
     }
 
     /// True when /etc/hosts no longer matches what we last applied — an OS
@@ -328,7 +404,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         while true {
             checkLock.lock(); recheckQueued = false; checkLock.unlock()
 
-            performCheck()
+            autoreleasepool { performCheck() }
 
             checkLock.lock()
             if recheckQueued { checkLock.unlock(); continue }
@@ -360,7 +436,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let results = detectExits(mode: checkedMode)
             detectedIPs = results
             if advancedPolicy {
-                let outcome = runPolicy(action: "evaluate", request: ["data": checkedPolicy, "ips": results])
+                let outcome = evaluatePolicy(data: checkedPolicy, ips: results)
                 policyReason = outcome["reason"] as? String ?? "策略检查失败，暂不放行"
                 riskScores = outcome["scores"] as? [String: Any] ?? [:]
                 jumpBlocked = outcome["jump_latched"] as? Bool == true
@@ -396,7 +472,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         apply(from: previous, to: newState)
         writeStateFile()  // publish verdict for the CLI wrapper
 
-        DispatchQueue.main.async { self.configurePolling(); self.updateStatusDisplay(); self.rebuildMenu() }
+        DispatchQueue.main.async { self.configurePolling() }
     }
 
     /// Publishes the verdict to state.json (single source of truth for the CLI
@@ -483,13 +559,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ("stun1.l.google.com", 19302),
         ("stun.cloudflare.com", 3478)
     ]
-    let httpServices = [
+    var httpServices = [
         "https://api.ipify.org?format=json",
         "https://ifconfig.me/ip",
         "https://ipinfo.io/ip",
         "https://icanhazip.com",
         "https://api.myip.com"
     ]
+    var httpSession: URLSession?
+    var httpSessionProxy = ""
+    var httpSessionDeadline: TimeInterval = 0
+    var preferredHTTPService: String?
+
+    func sessionForHTTPProbe(deadline: TimeInterval) -> URLSession {
+        let address = policyConfig["http_proxy"] as? String ?? ""
+        if let session = httpSession, httpSessionProxy == address, httpSessionDeadline == deadline { return session }
+        httpSession?.invalidateAndCancel()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.urlCache = nil
+        cfg.httpCookieStorage = nil
+        cfg.urlCredentialStorage = nil
+        cfg.httpShouldSetCookies = false
+        if !address.isEmpty, let proxy = URLComponents(string: address), let host = proxy.host, let port = proxy.port {
+            cfg.connectionProxyDictionary = ["HTTPEnable": 1, "HTTPProxy": host, "HTTPPort": port,
+                                             "HTTPSEnable": 1, "HTTPSProxy": host, "HTTPSPort": port]
+        }
+        cfg.timeoutIntervalForRequest = deadline
+        cfg.timeoutIntervalForResource = deadline
+        let session = URLSession(configuration: cfg)
+        httpSession = session
+        httpSessionProxy = address
+        httpSessionDeadline = deadline
+        return session
+    }
 
     static func describeBoth(_ ips: [String: String]) -> String {
         return "HTTP: \(ips["http"] ?? "未获取"); STUN: \(ips["stun"] ?? "未获取")"
@@ -532,13 +634,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let sem = DispatchSemaphore(value: 0)
         let lock = NSLock()
         var result: String? = nil
+        var winningService: String?
         var diagnostics: [String: [String: Any]] = [:]
         let started = Date()
-        func offer(_ ip: String?) {
+        func offer(_ ip: String?, service: String? = nil) {
             guard let ip = ip, !ip.isEmpty else { return }
             lock.lock()
             let first = (result == nil)
-            if first { result = ip }
+            if first { result = ip; winningService = service }
             lock.unlock()
             if first { sem.signal() }
         }
@@ -551,43 +654,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // HTTP (fallback, in parallel)
-        let cfg = URLSessionConfiguration.ephemeral
-        if let address = policyConfig["http_proxy"] as? String, !address.isEmpty,
-           let proxy = URLComponents(string: address), let host = proxy.host, let port = proxy.port {
-            cfg.connectionProxyDictionary = ["HTTPEnable": 1, "HTTPProxy": host, "HTTPPort": port,
-                                             "HTTPSEnable": 1, "HTTPSProxy": host, "HTTPSPort": port]
-        }
-        cfg.timeoutIntervalForRequest = deadline
-        cfg.timeoutIntervalForResource = deadline
-        let session = URLSession(configuration: cfg)
-        for service in (mode == "stun" ? [] : httpServices) {
-            guard let url = URL(string: service) else { continue }
-            var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: deadline)
-            req.setValue("ClaudeGuard/1.0", forHTTPHeaderField: "User-Agent")
-            session.dataTask(with: req) { data, response, err in
-                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                let parsed = Self.parseHTTPIP(data)
-                var detail: [String: Any] = ["http_status": code, "elapsed_ms": Int(Date().timeIntervalSince(started) * 1000)]
-                if let error = err as NSError? {
-                    detail["error_domain"] = error.domain
-                    detail["error_code"] = error.code
-                } else if !(200...299).contains(code) {
-                    detail["error"] = "HTTP 状态异常"
-                } else if parsed == nil {
-                    detail["error"] = "响应不含有效 IP"
+        var tasks: [URLSessionDataTask] = []
+        var resolved = false
+        if mode == "http" {
+            let session = sessionForHTTPProbe(deadline: deadline)
+            let services = httpServices.sorted { $0 == preferredHTTPService && $1 != preferredHTTPService }
+            func startHTTP(_ service: String) {
+                guard let url = URL(string: service) else { return }
+                var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: deadline)
+                req.setValue("ClaudeGuard/1.0", forHTTPHeaderField: "User-Agent")
+                // A fresh connection must observe the current route, including VPN changes.
+                req.setValue("close", forHTTPHeaderField: "Connection")
+                let task = session.dataTask(with: req) { data, response, err in
+                    let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    let parsed = Self.parseHTTPIP(data)
+                    var detail: [String: Any] = ["http_status": code, "elapsed_ms": Int(Date().timeIntervalSince(started) * 1000)]
+                    if let error = err as NSError? {
+                        detail["error_domain"] = error.domain
+                        detail["error_code"] = error.code
+                    } else if !(200...299).contains(code) {
+                        detail["error"] = "HTTP 状态异常"
+                    } else if parsed == nil {
+                        detail["error"] = "响应不含有效 IP"
+                    }
+                    lock.lock(); diagnostics[service] = detail; lock.unlock()
+                    guard err == nil, (200...299).contains(code) else { return }
+                    offer(parsed, service: service)
                 }
-                lock.lock(); diagnostics[service] = detail; lock.unlock()
-                guard err == nil, (200...299).contains(code) else { return }
-                offer(parsed)
-            }.resume()
+                tasks.append(task)
+                task.resume()
+            }
+            // Healthy polls need one request. Hedge slow/failing providers within the same deadline.
+            if let first = services.first { startHTTP(first) }
+            resolved = sem.wait(timeout: .now() + min(0.25, deadline / 4)) == .success
+            if !resolved { services.dropFirst().forEach { startHTTP($0) } }
         }
 
-        _ = sem.wait(timeout: .now() + deadline)
+        if !resolved { _ = sem.wait(timeout: .now() + max(0, deadline - Date().timeIntervalSince(started))) }
         conns.forEach { $0.cancel() }
-        session.invalidateAndCancel()
+        tasks.forEach { $0.cancel() }
 
-        lock.lock(); let ip = result; let details = diagnostics; lock.unlock()
+        lock.lock(); let ip = result; let details = diagnostics; let winner = winningService; lock.unlock()
+        if let winner = winner { preferredHTTPService = winner }
         if ip == nil {
             var fields: [String: Any] = ["mode": mode, "deadline_seconds": deadline, "elapsed_ms": Int(Date().timeIntervalSince(started) * 1000)]
             if mode == "http" {
@@ -643,6 +751,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             case .failed, .cancelled:
                 finish(nil)
+                conn.stateUpdateHandler = nil
             default:
                 break
             }
@@ -732,7 +841,65 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    static func isClaudeCLIPath(_ path: String, command: String = "") -> Bool {
+        let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+        if ["node", "node.exe"].contains(name) {
+            let script = command.split(whereSeparator: { $0.isWhitespace }).dropFirst().first(where: { !$0.hasPrefix("-") }) ?? ""
+            return script.contains("@anthropic-ai/claude-code/")
+        }
+        return ["claude", "claude.exe", "claude.orig", "claude.real"].contains(name)
+            || path.hasPrefix(NSHomeDirectory() + "/.local/share/claude/versions/")
+    }
+
+    static func executablePath(_ pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    func closeClaudeSessions(dryRun: Bool) -> Int32 {
+        let desktop = NSWorkspace.shared.runningApplications.filter { Self.isClaudeDesktop($0) }
+        let desktopIDs = Set(desktop.map { $0.processIdentifier })
+        var targets: [pid_t: String] = [:]
+        for app in desktop { targets[app.processIdentifier] = app.executableURL?.path ?? "Claude Desktop" }
+        let query = Process()
+        query.executableURL = URL(fileURLWithPath: "/bin/ps")
+        query.arguments = ["-axo", "pid=,uid=,command="]
+        let output = Pipe()
+        query.standardOutput = output
+        do {
+            try query.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            query.waitUntilExit()
+            for line in (String(data: data, encoding: .utf8) ?? "").split(separator: "\n") {
+                let fields = line.split(maxSplits: 2, whereSeparator: { $0.isWhitespace })
+                guard fields.count == 3, let pid = pid_t(fields[0]), let uid = uid_t(fields[1]),
+                      uid == getuid(), pid != getpid(), let path = Self.executablePath(pid), Self.isClaudeCLIPath(path, command: String(fields[2])) else { continue }
+                targets[pid] = path
+            }
+        } catch { fputs("无法查询 Claude Code 会话\n", stderr); return 1 }
+        if targets.isEmpty { print("没有匹配的 Claude 会话"); return 0 }
+        for pid in targets.keys.sorted() { print("PID \(pid)：\(targets[pid]!)") }
+        if dryRun { print("仅预览，未终止任何进程。"); return 0 }
+        _ = killDesktopIfRunning()
+        var failed = false
+        for (pid, path) in targets where !desktopIDs.contains(pid) {
+            guard Self.executablePath(pid) == path else { continue }
+            if kill(pid, SIGKILL) != 0 && errno != ESRCH { failed = true }
+        }
+        // Let the existing Desktop helper cleanup's delayed pass finish.
+        if !desktopIDs.isEmpty { Thread.sleep(forTimeInterval: 0.2) }
+        return failed ? 1 : 0
+    }
+
     func showBlockedAlert(reason: String) {
+        if headless {
+            let alert = Process()
+            alert.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            alert.arguments = ["--blocked-alert", reason]
+            try? alert.run()
+            return
+        }
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
@@ -742,15 +909,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             alert.addButton(withTitle: "知道了")
             alert.window.level = .floating
             alert.runModal()
+            if self.alertOnly { NSApp.terminate(nil) }
         }
     }
 
-    func runHelper(_ cmd: String, _ a1: String, _ a2: String) {
+    @discardableResult
+    func runHelper(_ cmd: String, _ a1: String, _ a2: String) -> Process? {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         let script = NSString(string: "~/.local/share/ClaudeGuard/src/helper.py").expandingTildeInPath
         task.arguments = [script, cmd, a1, a2]
-        try? task.run()
+        do { try task.run(); return task } catch { return nil }
     }
 
     // MARK: - Config
@@ -811,10 +980,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func updateStatusDisplay(isDimmed: Bool = false) {
-        guard let button = statusItem.button else { return }
-        button.title = ""
-        button.attributedTitle = NSAttributedString(string: "")
-
+        guard let button = statusItem?.button else { return }
         let symbol: String
         switch state {
         case .offline:  symbol = "shield.slash.fill"   // crossed-out shield: nothing to verify against
@@ -823,16 +989,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .blocked:  symbol = "xmark.shield.fill"
         }
 
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ClaudeGuard")?
+        if displayedSymbol != symbol, let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ClaudeGuard")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 15, weight: .semibold)) {
             image.isTemplate = true
             button.image = image
             button.image?.accessibilityDescription = statusText()
-            button.alphaValue = isDimmed ? 0.35 : 1.0
+            displayedSymbol = symbol
         }
+        button.alphaValue = isDimmed ? 0.35 : 1.0
     }
 
     func startBlinking() {
+        guard !headless else { return }
         DispatchQueue.main.async { [self] in
             guard blinkTimer == nil else { return }
             blinkState = false
@@ -851,19 +1019,61 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stopBlinking() {
+        guard !headless else { return }
         DispatchQueue.main.async { [self] in
+            let wasBlinking = blinkTimer != nil
             blinkTimer?.invalidate()
             blinkTimer = nil
             updateStatusDisplay()
-            if let button = statusItem.button {
+            if wasBlinking, let button = statusItem.button {
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.14
                     ctx.allowsImplicitAnimation = true
                     button.animator().alphaValue = 1.0
                 }
             }
-            rebuildMenu()
         }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) { rebuildMenu() }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard settingsOnly, menu === self.menu else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.closeSettingsWhenIdle() }
+    }
+
+    func closeSettingsWhenIdle() {
+        if settingsBusy || NSApp.modalWindow != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.closeSettingsWhenIdle() }
+        } else {
+            NSApp.terminate(nil)
+        }
+    }
+
+    func refreshSettingsState() {
+        loadConfig()
+        let path = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("state.json")
+        if let data = try? Data(contentsOf: path),
+           let snapshot = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let updated = snapshot["updated_at"] as? Double,
+           Date().timeIntervalSince1970 - updated <= max(7, checkInterval + 4) {
+            currentIP = snapshot["ip"] as? String ?? "No Internet"
+            detectedIPs = snapshot["detected_ips"] as? [String: String] ?? [:]
+            policyReason = snapshot["reason"] as? String ?? ""
+            riskScores = snapshot["scores"] as? [String: Any] ?? [:]
+            jumpBlocked = snapshot["jump_latched"] as? Bool == true
+            switch snapshot["state"] as? String {
+            case "allowed": state = .allowed(ip: currentIP)
+            case "blocked": state = .blocked(ip: currentIP)
+            case "disabled": state = .disabled
+            default: state = .offline
+            }
+        } else {
+            state = .offline
+            currentIP = "No Internet"
+            policyReason = "后台检测结果未更新，请运行 claudeguard start"
+        }
+        updateStatusDisplay()
     }
 
     func rebuildMenu() {
@@ -895,6 +1105,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let recheck = NSMenuItem(title: "🔄 重新检测", action: #selector(onRecheck), keyEquivalent: "")
         recheck.target = self
         menu.addItem(recheck)
+
+        let windows = NSMenuItem(title: "额度与窗口（Claude-W）", action: nil, keyEquivalent: "")
+        let windowMenu = NSMenu()
+        for (title, args) in [("状态与额度（本地缓存）", ["status", "--cached"]),
+                              ("刷新实时额度", ["usage"]), ("请求历史", ["history"]),
+                              ("调度预演（离线）", ["dry-run"]), ("启用周期自动请求…", ["auto"]),
+                              ("停止定时请求", ["stop"]), ("取消计划", ["cancel"]),
+                              ("立即尝试最小请求…", ["poke"]), ("预览终止范围", ["kill", "--dry-run"])] {
+            let item = NSMenuItem(title: title, action: #selector(onWindowAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = args
+            windowMenu.addItem(item)
+        }
+        let command = NSMenuItem(title: "创建计划 / 其他窗口命令…", action: #selector(onWindowCommand), keyEquivalent: "")
+        command.target = self
+        windowMenu.addItem(command)
+        windows.submenu = windowMenu
+        menu.addItem(windows)
 
         menu.addItem(.separator())
 
@@ -1006,14 +1234,75 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "退出 ClaudeGuard", action: #selector(onQuit), keyEquivalent: "")
+        let quit = NSMenuItem(title: settingsOnly ? "关闭设置（防护继续运行）" : "退出 ClaudeGuard", action: #selector(onQuit), keyEquivalent: "")
         quit.target = self
         menu.addItem(quit)
     }
 
     private func recheckAsync() {
+        if settingsOnly {
+            DistributedNotificationCenter.default().postNotificationName(Self.recheckNotification, object: nil, userInfo: nil, deliverImmediately: true)
+            return
+        }
         startBlinking()
         DispatchQueue.global(qos: .userInitiated).async { self.recheck() }
+    }
+
+    @objc func onWindowAction(_ sender: NSMenuItem) {
+        guard let args = sender.representedObject as? [String] else { return }
+        runWindowCommand(args)
+    }
+
+    @objc func onWindowCommand() {
+        let alert = NSAlert()
+        alert.messageText = "Claude-W 窗口管理"
+        alert.informativeText = "例如：10:00 -n 3（三次）、10:00 -d（每天）、schedule tomorrow 10:00、config --expected-ip <IPv4>、kill --dry-run、kill。创建计划会启用任务并消耗订阅额度。"
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        input.placeholderString = "10:00 -n 3"
+        alert.accessoryView = input
+        alert.addButton(withTitle: "下一步")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        runWindowCommand(input.stringValue.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+    }
+
+    func runWindowCommand(_ args: [String]) {
+        guard !args.isEmpty, !settingsBusy else { return }
+        let preview = args.contains("--dry-run")
+        let action = args[0]
+        if !preview && (["auto", "start", "poke", "schedule", "kill", "ckill"].contains(action) || action.contains(":")) {
+            let confirm = NSAlert()
+            confirm.messageText = "执行窗口管理命令？"
+            confirm.informativeText = args.joined(separator: " ") + "\n\n" +
+                (["kill", "ckill"].contains(action) ? "将终止当前用户的 Claude 会话，未保存内容可能丢失。ClaudeGuard 保持运行。" : "创建计划、启用自动模式或立即尝试会发送最小模型请求并消耗订阅额度。仍须通过出口、防护、登录及额度检查。")
+            confirm.addButton(withTitle: "执行")
+            confirm.addButton(withTitle: "取消")
+            guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        }
+        settingsBusy = true
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            process.arguments = [NSString(string: "~/.local/share/ClaudeGuard/bin/claude-w").expandingTildeInPath] + args
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = output
+            let text: String
+            do {
+                try process.run()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                text = String(data: data, encoding: .utf8) ?? "无法读取结果"
+            } catch { text = "窗口管理启动失败：\(error.localizedDescription)" }
+            DispatchQueue.main.async {
+                let notice = NSAlert()
+                notice.messageText = "Claude-W 执行结果"
+                notice.informativeText = text.isEmpty ? "命令已结束，无输出。" : text
+                notice.addButton(withTitle: "关闭")
+                notice.runModal()
+                self.settingsBusy = false
+            }
+        }
     }
 
     func runPolicy(action: String, request: [String: Any]) -> [String: Any] {
@@ -1037,6 +1326,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let raw = output.fileHandleForReading.readDataToEndOfFile()
         return (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] ?? failure
+    }
+
+    func evaluatePolicy(data: [String: Any], ips: [String: String]) -> [String: Any] {
+        let request: [String: Any] = ["data": data, "ips": ips]
+        let encoded = try? JSONSerialization.data(withJSONObject: request, options: .sortedKeys)
+        let path = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("admission-state.json")
+        let before = try? Data(contentsOf: path)
+        if encoded == cachedPolicyRequest, before == cachedPolicyState, Date() >= cachedPolicyCreated, Date() < cachedPolicyExpires,
+           var outcome = cachedPolicyOutcome {
+            if var scores = outcome["scores"] as? [String: [String: Any]] {
+                for ip in Array(scores.keys) { scores[ip]?["cached"] = true }
+                outcome["scores"] = scores
+            }
+            return outcome
+        }
+        cachedPolicyOutcome = nil
+        let outcome = runPolicy(action: "evaluate", request: request)
+        // Reuse stable policy transactions; fresh IP probes and shared-state reads still run every tick.
+        let resultState = outcome["state"] as? String
+        let scores = outcome["scores"] as? [String: [String: Any]] ?? [:]
+        let reusable = resultState == "allowed" || (resultState == "blocked"
+            && outcome["reason"] as? String != "策略检查失败，暂不放行"
+            && (data["access_mode"] as? String ?? "whitelist" != "risk" || outcome["jump_latched"] as? Bool == true || !scores.isEmpty))
+        if encoded != nil, reusable, before == (try? Data(contentsOf: path)) {
+            var expires = Date.distantFuture
+            let ttl = (data["risk_cache_ttl"] as? NSNumber)?.doubleValue ?? 21600
+            for entry in scores.values {
+                expires = min(expires, Date(timeIntervalSince1970: ((entry["fetched_at"] as? NSNumber)?.doubleValue ?? 0) + ttl))
+            }
+            cachedPolicyRequest = encoded
+            cachedPolicyState = before
+            cachedPolicyOutcome = outcome
+            cachedPolicyCreated = Date()
+            cachedPolicyExpires = expires
+        }
+        return outcome
     }
 
     @objc func onSelectAccessMode(_ sender: NSMenuItem) {
@@ -1144,10 +1469,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "信任并重新检查")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        settingsBusy = true
         DispatchQueue.global(qos: .userInitiated).async {
             let freshIPs = self.detectExits(mode: mode)
             let result = self.runPolicy(action: "ack-evaluate", request: ["data": data, "ips": freshIPs, "expected_ips": expected])
-            self.recheck()
+            self.recheckAsync()
             DispatchQueue.main.async {
                 let notice = NSAlert()
                 let acknowledged = result["jump_acknowledged"] as? Bool == true
@@ -1155,6 +1481,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 notice.informativeText = result["reason"] as? String ?? "策略检查失败"
                 notice.addButton(withTitle: "知道了")
                 notice.runModal()
+                self.settingsBusy = false
             }
         }
     }
@@ -1245,8 +1572,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func onQuit() { NSApplication.shared.terminate(nil) }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+// MARK: - Entry point
+if CommandLine.arguments.contains("--kill-sessions") {
+    exit(AppDelegate().closeClaudeSessions(dryRun: CommandLine.arguments.contains("--dry-run")))
+} else if CommandLine.arguments.contains("--daemon") {
+    let delegate = AppDelegate()
+    delegate.headless = true
+    guard delegate.acquireDaemonLock() else { exit(0) }
+    delegate.startGuard()
+    RunLoop.main.run()
+} else {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let delegate = AppDelegate()
+    delegate.settingsOnly = true
+    delegate.alertOnly = CommandLine.arguments.contains("--blocked-alert")
+    app.delegate = delegate
+    app.run()
+}

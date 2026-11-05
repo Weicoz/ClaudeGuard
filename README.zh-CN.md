@@ -1,10 +1,16 @@
 # ClaudeGuard 中文版
 
-ClaudeGuard 是一个运行在 macOS 菜单栏的 Claude 防护工具。它检查当前公网出口是否在你设置的白名单中，通过后才允许启动 Claude 桌面端或 Claude Code。检测到出口不符合要求时，会关闭对应会话，并阻断相关域名的连接。
+ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护检测出口，设置菜单按需打开。它检查当前公网出口是否在你设置的白名单中，通过后才允许启动 Claude 桌面端或 Claude Code。检测到出口不符合要求时，会关闭对应会话，并阻断相关域名的连接。
 
 本项目基于 [ivblz/ClaudeGuard](https://github.com/ivblz/ClaudeGuard) 修改，增加了可选择的出口检测方式，并将菜单、弹窗和命令行提示改为中文。保留原项目的 MIT 许可证。
 
 [English](README.md) | [Русский](README.ru.md)
+
+## DMG 与 Claude-W
+
+macOS 预览版支持 Apple Silicon / Intel 通用 DMG，镜像内双击安装入口；当前未做 Apple 公证，需要可用的 `/usr/bin/python3`。构建及限制见 [macOS 发行说明](docs/release-macos.md)。
+
+Claude-W 已完整集成：运行 `claudeguard window --help` 查看额度、历史、窗口计划和进程关闭功能，也可以从设置的“额度与窗口”进入。新安装的自动请求默认关闭，旧命令兼容保留；关闭进程统一调用 ClaudeGuard。详见 [Claude-W 集成](docs/claude-w.md)。
 
 ## 访问规则与 IP 跳变
 
@@ -26,7 +32,7 @@ cd ClaudeGuard
 ./install.sh
 ```
 
-安装后，菜单栏会出现盾牌图标。点击图标即可查看状态、管理白名单、切换检测方式。程序会在登录 macOS 后自动启动。
+安装后，后台防护会在登录 macOS 后自动启动，不保留常驻菜单栏进程。运行 `claudeguard settings` 或打开 `ClaudeGuard.app`，即可查看状态、管理白名单、切换检测方式。关闭设置菜单后，界面进程自动退出，后台防护继续运行。
 
 第一次安装时，如果询问是否将当前 IP 加入白名单，请先确认它就是你希望允许使用的出口。也可以跳过，之后手动添加：
 
@@ -89,7 +95,7 @@ claudeguard disable-protection
 claudeguard enable-protection
 ```
 
-“退出 ClaudeGuard”或 `claudeguard stop` 只是停止菜单栏守护，已经写入的网络限制不会自动解除。需要暂时恢复访问时，应先关闭防护。
+“关闭设置”保留后台防护。`claudeguard stop` 停止后台守护，已经写入的网络限制不会自动解除。需要暂时恢复访问时，应先关闭防护。
 
 卸载时，在源码目录运行：
 

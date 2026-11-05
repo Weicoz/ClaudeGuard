@@ -99,6 +99,13 @@ class PortableTests(unittest.TestCase):
             current.return_value.username.return_value = 'me'
             self.assertEqual(enforce([str(target)]), [])
             stop.assert_called_once_with(ours)
+            current.assert_called_once_with()
+
+    def test_no_enforcement_targets_skips_process_scan(self):
+        from portable.platforms import enforce
+        with patch('portable.platforms.psutil.process_iter') as scan:
+            self.assertEqual(enforce(['', None]), [])
+            scan.assert_not_called()
 
     def test_real_child_termination(self):
         from portable.platforms import stop_tree

@@ -1,0 +1,6 @@
+ClaudeGuard retains the MIT license and copyright of ivblz.
+
+The integrated Claude-W window manager is based on Weicoz/claude-w,
+commit 0f001d171886e780bde05fe28c2507e53970cf04, with the owner's permission.
+Its quota, scheduling, history and compatibility behavior are retained;
+process closing is delegated to ClaudeGuard's native implementation.

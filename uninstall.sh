@@ -16,6 +16,11 @@ except Exception:
 " 2>/dev/null)
 
 echo "=================================================="
+
+# Restore legacy window commands; keep all request history and schedules.
+if [ -f "$INSTALL_DIR/src/window_install.py" ]; then
+    (cd "$INSTALL_DIR" && /usr/bin/python3 -m src.window_install --uninstall) || exit 1
+fi
 echo " 🛑 Uninstalling ClaudeGuard (Clean Reset)"
 echo "=================================================="
 
@@ -29,8 +34,7 @@ fi
 
 # 2. Terminate running background processes
 echo "--> Stopping running processes..."
-pkill -f "ClaudeGuardMenuBar" 2>/dev/null || true
-pkill -f "ClaudeGuard" 2>/dev/null || true
+pkill -f '/ClaudeGuardMenuBar( |$)' 2>/dev/null || true
 
 # 2b. Remove the root network-helper LaunchDaemon + its binary, and disable pf
 echo "--> Removing root network helper (LaunchDaemon)..."

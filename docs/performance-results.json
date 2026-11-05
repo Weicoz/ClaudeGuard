@@ -1,0 +1,106 @@
+{
+  "date": "2026-11-05",
+  "platform": "macOS arm64",
+  "baseline_live": {
+    "pid_at_measurement": 22296,
+    "physical_footprint_raw": "23.8M",
+    "cpu_short_samples_percent": [
+      0.0,
+      1.9,
+      0.0
+    ],
+    "scope": "installed original process; not directly comparable to isolated fixture"
+  },
+  "menu_fixture_comparison": [
+    {
+      "label": "baseline",
+      "cpu_percent_25s": 0.6635442354806318,
+      "rss_mib_min": 44.6875,
+      "rss_mib_max": 49.0,
+      "footprint": [
+        "Physical footprint:         13.9M",
+        "Physical footprint (peak):  14.0M"
+      ],
+      "http_requests": 53
+    },
+    {
+      "label": "optimized",
+      "cpu_percent_25s": 0.11406934718843222,
+      "rss_mib_min": 42.96875,
+      "rss_mib_max": 47.796875,
+      "footprint": [
+        "Physical footprint:         12.4M",
+        "Physical footprint (peak):  12.4M"
+      ],
+      "http_requests": 11
+    }
+  ],
+  "minimal_appkit_raw_footprint": "11.7M",
+  "headless_live_https": {
+    "scope": "isolated HTTP guard; enforcement and repair side effects replaced",
+    "transport": "live HTTPS",
+    "sample_seconds": 60,
+    "actual_elapsed_seconds": 60.966,
+    "cpu_percent": 0.5405,
+    "physical_footprint_mb": 7.063,
+    "physical_footprint_peak_mb": 7.063,
+    "rss_mb_min": 19.988,
+    "rss_mb_max": 21.447,
+    "max_children_after_warmup": 0,
+    "process_counts": {
+      "failed_probes": 8,
+      "policy_processes_after_warmup": 1,
+      "helper_requests_after_warmup": 0,
+      "helper_requests": 1,
+      "policy_processes": 4,
+      "verified_probes": 17
+    },
+    "loopback_requests": null,
+    "meets_idle_targets": false
+  },
+  "limitations": [
+    "Isolated guard replaces hosts/pf enforcement and integrity repair side effects; this is not production acceptance.",
+    "AppKit UI interaction blocked by Computer Use app permission.",
+    "Windows WFP/Linux kernel integration and active Claude Code session resource use not measured.",
+    "RSS exceeds 10 MB; target is met only under the physical-footprint metric.",
+    "Transient UI, initial policy checks and repairs may exceed the idle-memory target."
+  ],
+  "headless_loopback": {
+    "scope": "isolated HTTP guard; enforcement and repair side effects replaced",
+    "transport": "loopback HTTP",
+    "sample_seconds": 60,
+    "actual_elapsed_seconds": 60.585,
+    "cpu_percent": 0.0829,
+    "cpu_main_percent": 0.0829,
+    "physical_footprint_mb": 5.277,
+    "physical_footprint_peak_mb": 5.342,
+    "rss_mb_min": 17.17,
+    "rss_mb_max": 17.58,
+    "max_children_after_warmup": 0,
+    "process_counts": {
+      "child_cpu_seconds_after_warmup": 0,
+      "failed_probes": 0,
+      "verified_probes": 25,
+      "policy_processes_after_warmup": 0,
+      "helper_requests": 1,
+      "policy_processes": 2,
+      "helper_requests_after_warmup": 0
+    },
+    "loopback_requests": 25,
+    "meets_idle_targets": true
+  },
+  "installed_production": {
+    "scope": "installed production guard, real configured network and enforcement",
+    "pid": 52365,
+    "sample_seconds": 60.84464062499683,
+    "cpu_percent_including_reaped_children": 0.2674,
+    "physical_footprint_mb": 6.571,
+    "physical_footprint_peak_mb": 6.669,
+    "rss_mb_min": 19.218432,
+    "rss_mb_max": 19.873792,
+    "max_observed_children": 0,
+    "state": "allowed",
+    "state_age_seconds": 1.347,
+    "check_interval": 3
+  }
+}

@@ -123,10 +123,11 @@ def discover_real_cli(config=None):
     The configured path wins while it resolves, so an explicit `set-cli-path`
     sticks and the hand-off target doesn't jitter between installs; the rest is
     the recovery order for when an upgrade has deleted it."""
-    candidates = []
     if config is not None:
-        candidates.append(config.config.get("real_claude_cli_path"))
-    candidates += _cask_binaries() + _native_binaries() + _path_binaries()
+        configured = _usable_real_cli(config.config.get("real_claude_cli_path"))
+        if configured:
+            return configured
+    candidates = _cask_binaries() + _native_binaries() + _path_binaries()
     for candidate in candidates:
         real = _usable_real_cli(candidate)
         if real:

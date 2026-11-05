@@ -10,6 +10,12 @@ from src import integrity
 
 
 class CLIDiscoveryTests(unittest.TestCase):
+    def test_configured_cli_avoids_discovery_scans(self):
+        config = SimpleNamespace(config={'real_claude_cli_path': '/configured/claude'})
+        with patch.object(integrity, '_usable_real_cli', return_value='/configured/claude'), patch.object(integrity, '_cask_binaries', return_value=[]) as scan:
+            self.assertEqual(integrity.discover_real_cli(config), '/configured/claude')
+            scan.assert_not_called()
+
     def test_native_version_files_recover_after_update(self):
         with tempfile.TemporaryDirectory() as directory:
             versions = Path(directory) / '.local/share/claude/versions'

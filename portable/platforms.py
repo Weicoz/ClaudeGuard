@@ -35,11 +35,14 @@ def stop_tree(process):
 
 def enforce(paths):
     paths = {normalized(p) for p in paths if p}
+    if not paths:
+        return []
+    username = psutil.Process().username()
     failures = []
     for process in psutil.process_iter(["pid", "exe", "username"]):
         try:
             # A per-user guard never interferes with another user's applications.
-            if process.info["username"] != psutil.Process().username():
+            if process.info["username"] != username:
                 continue
             executable = process.info.get("exe")
             if executable and normalized(executable) in paths:

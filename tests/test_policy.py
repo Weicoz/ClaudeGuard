@@ -82,6 +82,18 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(self.evaluate(score_lookup=lookup)['state'], 'blocked')
         lookup.assert_not_called()
 
+    def test_unchanged_admission_does_not_rewrite_state(self):
+        self.data['detect_ip_change'] = True
+        self.assertEqual(self.evaluate()['state'], 'allowed')
+        path = self.directory / 'admission-state.json'
+        before = path.stat()
+        with patch.object(policy, 'atomic_json', wraps=policy.atomic_json) as write:
+            self.assertEqual(self.evaluate()['state'], 'allowed')
+            write.assert_not_called()
+        self.assertEqual(path.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertEqual(self.evaluate({'http': B})['state'], 'blocked')
+        self.assertTrue(json.loads(path.read_text())['jump_latched'])
+
     def test_risk_mode_does_not_require_whitelist(self):
         self.data.update(access_mode='risk', allowed_ips=[])
         self.assertEqual(self.evaluate(score_lookup=lambda ip: 10)['state'], 'allowed')

@@ -56,8 +56,10 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
 
 启动与管理：
   launch-desktop       检查出口后启动 Claude 桌面端
-  start                启动 ClaudeGuard 菜单栏守护
-  stop                 停止菜单栏守护，已有网络限制不会自动解除
+  start                启动 ClaudeGuard 轻量后台守护
+  settings             按需打开设置，关闭后防护继续运行
+  window <命令>        Claude-W 额度、历史、计划及进程管理；window --help 查看全部功能
+  stop                 停止后台守护，已有网络限制不会自动解除
   install-cli-wrapper  为 claude 命令安装启动检查
   set-cli-path <path>  指定原始 Claude Code 程序的路径
 """
@@ -69,6 +71,10 @@ def main():
         sys.exit(0)
 
     cmd = sys.argv[1].lower()
+    if cmd == "window":
+        from src.window_manager import main as window_main
+        sys.argv = ["claude-w", *sys.argv[2:]]
+        raise SystemExit(window_main())
     config = ConfigManager()
 
     if cmd == "status":
@@ -229,15 +235,19 @@ def main():
         plist = os.path.expanduser("~/Library/LaunchAgents/com.claudeguard.daemon.plist")
         app_path = os.path.expanduser("~/.local/share/ClaudeGuard/bin/ClaudeGuardMenuBar")
         subprocess.run(["launchctl", "load", plist], capture_output=True)
-        if not os.system("pgrep -f ClaudeGuardMenuBar >/dev/null") == 0:
-            subprocess.Popen([app_path])
-        print("🚀 ClaudeGuard 菜单栏守护已启动。")
+        if not daemon_is_up():
+            subprocess.Popen([app_path, "--daemon"])
+        print("🚀 已请求启动 ClaudeGuard 后台守护。")
+
+    elif cmd == "settings":
+        app_path = os.path.join(PROJECT_DIR, "bin", "ClaudeGuardMenuBar")
+        subprocess.Popen([app_path, "--settings"])
 
     elif cmd in ("stop", "quit", "close"):
         plist = os.path.expanduser("~/Library/LaunchAgents/com.claudeguard.daemon.plist")
         subprocess.run(["launchctl", "unload", plist], capture_output=True)
-        subprocess.run(["pkill", "-f", "ClaudeGuardMenuBar"], check=False)
-        print("🛑 菜单栏守护已停止，已有网络限制不会自动解除。")
+        subprocess.run(["pkill", "-f", r"/ClaudeGuardMenuBar( |$)"], check=False)
+        print("🛑 后台守护已停止，已有网络限制不会自动解除。")
 
     elif cmd in ("doctor", "repair"):
         doctor(config)
@@ -296,7 +306,7 @@ def doctor(config):
 
     print("\nClaude 桌面端")
     if report["desktop_app"]:
-        print(f"  🟢 {report['desktop_app']}（由菜单栏守护保护）")
+        print(f"  🟢 {report['desktop_app']}（由后台守护保护）")
     else:
         print("  ⚪ 未安装")
 

@@ -57,7 +57,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/ma
 ./install.sh
 ```
 
-В обоих случаях скрипт соберёт всё под вашу архитектуру (Apple Silicon или Intel), поставит меню-бар демон в
+В обоих случаях скрипт соберёт всё под вашу архитектуру (Apple Silicon или Intel), поставит лёгкий фоновый демон в
 автозапуск и повесит обёртку на `claude`. Один раз спросит пароль (`sudo` нужен для правки `/etc/hosts` и pf)
 и предложит добавить текущий IP в whitelist - соглашайтесь, **только если вы сейчас под своим VPN.**
 
@@ -68,6 +68,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/ma
 ```
 
 ## CLI
+
+Claude-W интегрирован: `claudeguard window --help`. Новые задачи автоматических запросов отключены по умолчанию. Остановка процессов использует реализацию ClaudeGuard. [DMG и ограничения подписи](docs/release-macos.md).
 
 После установки доступна команда `claudeguard`:
 
@@ -82,7 +84,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/keii-2596/ClaudeGuard/ma
 | `claudeguard set-model <model>` | Задать модель по умолчанию (например `claude-opus-4-8`) |
 | `claudeguard enable-model` / `disable-model` | Включить / выключить подмену модели |
 | `claudeguard launch-desktop` | Запустить Claude Desktop с pre-flight проверкой |
-| `claudeguard start` / `stop` | Запустить / остановить меню-бар демон |
+| `claudeguard start` / `stop` | Запустить / остановить фоновый демон |
+| `claudeguard settings` | Открыть настройки; закрытие меню не останавливает защиту |
 | `claudeguard doctor` | Проверить, что все перехваты на месте, и переустановить их |
 | `claudeguard set-cli-path <path>` | Указать путь до настоящего `claude`, если автоопределение промахнулось |
 
@@ -102,7 +105,7 @@ bundle id и папки автообновления уже переименов
 
 1. **STUN-first детект IP** - внешний IP берётся одним UDP-раундтрипом STUN (десятки мс), с откатом на HTTP-сервисы там, где UDP заблокирован.
 2. **Мозг** (`src/brain.py`) превращает IP в один вердикт - `allowed` / `blocked` / `offline` - и работает **fail closed**: пускает только подтверждённый `allowed`.
-3. **Единый источник истины** - меню-бар демон пишет вердикт в `~/.config/claudeguard/state.json` на каждой проверке. Обёртка CLI и лаунчер читают его (мгновенно) и делают свою проверку только если демон лёг.
+3. **Единый источник истины** - фоновый демон пишет вердикт в `~/.config/claudeguard/state.json` на каждой проверке. Обёртка CLI и лаунчер читают его (мгновенно) и делают свою проверку только если демон лёг.
 4. **Энфорсмент** - всё семейство доменов Claude/Anthropic (~175 хостов на 5 корневых доменах) блокируется через `/etc/hosts` + правило pf (TCP + UDP/QUIC); приложение force-quit'ится с алертом; активная сессия `claude` убивается в момент, когда IP слетает с whitelist.
 
 > **Область применения:** это защита от *случайной* утечки на своей машине, а не от злонамеренного админа. По-настоящему непробиваемый слой (Network Extension content filter) требует платного Apple Developer аккаунта; здешний on-device подход - бесплатный потолок, и со случайными утечками справляется хорошо.
@@ -119,7 +122,7 @@ src/
   integrity.py      Ищет реальные пути Claude; переподключает перехваты после переустановки
   cli_wrapper.py    Pre-flight перехватчик команды `claude`
   app_launcher.py   Pre-flight перехватчик Claude.app
-  main.swift        Нативный меню-бар демон (AppKit): мониторинг, алерты, state-файл
+  main.swift        Фоновая защита + настройки и уведомления AppKit по запросу
   hosts_helper.c    Root-хелпер, запускается LaunchDaemon (без sudoers и setuid): пишет /etc/hosts + pf
 bin/claudeguard     CLI управления
 assets/AppIcon.png  Иконка приложения
