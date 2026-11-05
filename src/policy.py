@@ -43,7 +43,9 @@ def settings(data):
 
 
 def advanced(data):
-    return data.get('access_mode', 'whitelist') != 'whitelist' or data.get('detect_ip_change', False) is not False
+    return (data.get('access_mode', 'whitelist') != 'whitelist'
+            or data.get('detect_ip_change', False) is not False
+            or data.get('allow_unknown_ip', False) is True)
 
 
 def atomic_json(path, value):
@@ -166,12 +168,16 @@ def evaluate(data, ips, directory, acknowledge=False, expected_ips=None, now=Non
                 atomic_json(path, state)  # persist before doing any network risk lookup
             if data['detect_ip_change'] and state['jump_latched'] and not acknowledge:
                 return {**deny('检测到 IP 跳变，已持续拦截。请确认是否信任当前 IP'), 'jump_latched': True, 'jump_details': state.get('jump_details', {})}
-            if len(ips) != len(modes):
-                missing = '、'.join(m.upper() for m in modes if m not in ips)
-                if data.get('allow_unknown_ip'):
-                    return {**result, 'state': 'allowed',
-                            'reason': f'未获取到 {missing} 出口 IP，按设置放行', 'error': None}
+            missing_modes = [m for m in modes if m not in ips]
+            allow_unknown = bool(data.get('allow_unknown_ip')) and bool(missing_modes)
+            if missing_modes and not allow_unknown:
+                missing = '、'.join(m.upper() for m in missing_modes)
                 return deny(f'未获取到 {missing} 出口 IP，暂不放行。请检查代理连接或稍后重新检测')
+            if not ips:
+                # 完全探测失败：只有这种情形才按设置放行
+                missing = '、'.join(m.upper() for m in missing_modes)
+                return {**result, 'state': 'allowed',
+                        'reason': f'未获取到 {missing} 出口 IP，按设置放行', 'error': None}
             if acknowledge:
                 state['jump_latched'] = False
                 state.pop('jump_details', None)
@@ -213,24 +219,40 @@ def evaluate(data, ips, directory, acknowledge=False, expected_ips=None, now=Non
                     result['scores'][ip] = {'score': score, 'cached': bool(valid), 'fetched_at': fetched, 'provider': 'proxycheck.io'}
                     if score > data['risk_threshold']:
                         return deny(f'{ip} 的风险分为 {score:g}，超过阈值 {data["risk_threshold"]:g}')
-            if data['detect_ip_change']:
+            if data['detect_ip_change'] and not missing_modes:
                 # Establish unseen transport baselines only after the whole rule passes.
                 state['baseline'].update(ips)
             atomic_json(path, state)
+            if missing_modes:
+                missing = '、'.join(m.upper() for m in missing_modes)
+                return {**result, 'state': 'allowed', 'error': None,
+                        'reason': f'已获取的出口通过检查，未获取到 {missing}，按设置放行'}
             return {**result, 'state': 'allowed', 'reason': '出口已通过检查'}
     except Exception as exc:
         return {'state': 'blocked', 'ip': None, 'detected_ips': {}, 'scores': {},
                 'reason': '策略检查失败，暂不放行', 'error': str(exc)}
 
 
+def _failure(reason, error=None, state='blocked'):
+    return {'state': state, 'ip': None, 'scores': {}, 'detected_ips': {},
+            'jump_latched': False, 'reason': reason, 'error': error}
+
+
 def check(data, directory, acknowledge=False, expected_ips=None):
     try:
         data = settings(data)
-        if not data.get('protection_enabled', True):
-            return evaluate(data, {}, directory)
-        return evaluate(data, detect(data), directory, acknowledge, expected_ips)
     except Exception as exc:
-        if isinstance(data, dict) and data.get('allow_unknown_ip') is True:
-            return {'state': 'allowed', 'ip': None, 'scores': {}, 'detected_ips': {},
-                    'reason': '出口检测失败，按设置放行', 'error': None}
-        return {'state': 'blocked', 'ip': None, 'scores': {}, 'detected_ips': {}, 'reason': '出口检测失败，暂不放行', 'error': str(exc)}
+        # 配置非法不属于「探测失败」，始终拦截
+        return _failure('策略检查失败，暂不放行', str(exc))
+    if not data.get('protection_enabled', True):
+        return evaluate(data, {}, directory)
+    try:
+        ips = detect(data)
+    except Exception as exc:
+        if data.get('allow_unknown_ip'):
+            return _failure('出口检测失败，按设置放行', state='allowed')
+        return _failure('出口检测失败，暂不放行', str(exc))
+    try:
+        return evaluate(data, ips, directory, acknowledge, expected_ips)
+    except Exception as exc:
+        return _failure('策略检查失败，暂不放行', str(exc))

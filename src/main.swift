@@ -91,7 +91,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let access = policyConfig["access_mode"] == nil ? "whitelist" : (policyConfig["access_mode"] as? String ?? "invalid")
         let rawJump = policyConfig["detect_ip_change"]
         let jump = rawJump as? Bool ?? (rawJump != nil)
-        return access != "whitelist" || jump
+        let rawAllow = policyConfig["allow_unknown_ip"]
+        let allowUnknown = rawAllow as? Bool ?? (rawAllow != nil)
+        return access != "whitelist" || jump || allowUnknown
     }
     var verdictAllowedIPs: [String] = []
 

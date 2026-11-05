@@ -47,6 +47,20 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(partial['state'], 'allowed')
         self.assertIn('STUN', partial['reason'])
 
+    def test_partial_result_still_checked(self):
+        data = {**self.data, 'allow_unknown_ip': True, 'ip_check_mode': 'both'}
+        self.assertEqual(policy.evaluate(data, {'http': B}, self.directory)['state'], 'allowed')
+        self.assertEqual(policy.evaluate(data, {'http': '198.51.100.99'}, self.directory)['state'], 'blocked')
+
+    def test_config_error_never_fails_open(self):
+        data = {**self.data, 'allow_unknown_ip': True, 'access_mode': 'typo'}
+        self.assertEqual(policy.check(data, self.directory)['state'], 'blocked')
+        self.assertEqual(policy.evaluate(data, {'http': A}, self.directory)['state'], 'blocked')
+
+    def test_allow_unknown_ip_enables_advanced_policy(self):
+        self.assertTrue(policy.advanced({'access_mode': 'whitelist', 'detect_ip_change': False, 'allow_unknown_ip': True}))
+        self.assertFalse(policy.advanced({'access_mode': 'whitelist', 'detect_ip_change': False, 'allow_unknown_ip': False}))
+
     def test_allow_unknown_ip_rejects_non_bool(self):
         with self.assertRaises(ValueError):
             policy.settings({**self.data, 'allow_unknown_ip': 'true'})
