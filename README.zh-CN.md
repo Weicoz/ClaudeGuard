@@ -8,6 +8,8 @@ ClaudeGuard 是一个运行在 macOS 菜单栏的 Claude 防护工具。它检�
 
 ## 访问规则与 IP 跳变
 
+菜单栏新增「无法检测到 IP 时放行」：开启后，探测不到出口 IP 时不再拦截，适合代理启动瞬间不可用的场景。默认关闭，细节见[白名单、风险评分与 IP 跳变](docs/access-policy.md)。
+
 支持固定 IP 白名单或风险分阈值两种规则。风险分采用与 ipcheck 相同的 proxycheck.io 来源，并按 IP 缓存在本机。还可以开启 IP 跳变检测，变化后即使新出口在白名单中，也会持续拦截，直到用户确认。详细设置见[白名单、风险评分与 IP 跳变](docs/access-policy.md)。
 
 ## Windows 与 Linux

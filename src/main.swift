@@ -414,6 +414,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "detected_ips": detectedIPs,
             "access_mode": verdictPolicyConfig["access_mode"] ?? "whitelist",
             "detect_ip_change": verdictPolicyConfig["detect_ip_change"] ?? false,
+            "allow_unknown_ip": verdictPolicyConfig["allow_unknown_ip"] ?? false,
             "reason": policyReason,
             "scores": riskScores,
             "jump_latched": jumpBlocked,
@@ -773,7 +774,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var json: [String: Any] = [:]
         if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
            let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { json = existing }
-        for key in ["access_mode", "risk_threshold", "risk_cache_ttl", "detect_ip_change", "check_interval", "http_proxy", "cli_http_proxy_enabled"] {
+        for key in ["access_mode", "risk_threshold", "risk_cache_ttl", "detect_ip_change", "allow_unknown_ip", "check_interval", "http_proxy", "cli_http_proxy_enabled"] {
             if let value = policyConfig[key] { json[key] = value }
         }
         json["allowed_ips"] = allowedIPs
@@ -916,6 +917,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let jumpToggle = NSMenuItem(title: jump ? "✓ 检测 IP 跳变" : "检测 IP 跳变", action: #selector(onToggleIPChange), keyEquivalent: "")
         jumpToggle.target = self
         menu.addItem(jumpToggle)
+
+        let allowUnknown = policyConfig["allow_unknown_ip"] as? Bool == true
+        let allowToggle = NSMenuItem(title: allowUnknown ? "✓ 无法检测到 IP 时放行" : "无法检测到 IP 时放行", action: #selector(onToggleAllowUnknownIP), keyEquivalent: "")
+        allowToggle.target = self
+        menu.addItem(allowToggle)
         if jump && jumpBlocked {
             let ack = NSMenuItem(title: "信任当前 IP 并解除拦截…", action: #selector(onAcknowledgeIPChange), keyEquivalent: "")
             ack.target = self
@@ -1118,6 +1124,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func onToggleIPChange() {
         policyConfig["detect_ip_change"] = !(policyConfig["detect_ip_change"] as? Bool ?? false)
+        saveConfig()
+        recheckAsync()
+    }
+    @objc func onToggleAllowUnknownIP() {
+        policyConfig["allow_unknown_ip"] = !(policyConfig["allow_unknown_ip"] as? Bool ?? false)
         saveConfig()
         recheckAsync()
     }

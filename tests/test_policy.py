@@ -31,6 +31,26 @@ class PolicyTests(unittest.TestCase):
         for value in (1, 1.5, 3, 60):
             self.assertEqual(policy.settings({**self.data, 'check_interval': value})['check_interval'], value)
 
+    def test_unknown_ip_blocks_by_default(self):
+        result = policy.evaluate(self.data, {}, self.directory)
+        self.assertEqual(result['state'], 'blocked')
+        self.assertIn('未获取到 HTTP 出口 IP', result['reason'])
+
+    def test_allow_unknown_ip_option(self):
+        data = {**self.data, 'allow_unknown_ip': True}
+        result = policy.evaluate(data, {}, self.directory)
+        self.assertEqual(result['state'], 'allowed')
+        self.assertIn('按设置放行', result['reason'])
+
+        both = {**data, 'ip_check_mode': 'both'}
+        partial = policy.evaluate(both, {'http': A}, self.directory)
+        self.assertEqual(partial['state'], 'allowed')
+        self.assertIn('STUN', partial['reason'])
+
+    def test_allow_unknown_ip_rejects_non_bool(self):
+        with self.assertRaises(ValueError):
+            policy.settings({**self.data, 'allow_unknown_ip': 'true'})
+
     def test_whitelist_does_not_query_scores(self):
         lookup = Mock(side_effect=AssertionError('unexpected score lookup'))
         self.assertEqual(self.evaluate(score_lookup=lookup)['state'], 'allowed')

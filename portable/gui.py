@@ -66,6 +66,8 @@ def show(settings):
     ttk.Entry(advanced, textvariable=policy_numbers["check_interval"]).pack(fill="x")
     jump = tk.BooleanVar(value=data["detect_ip_change"])
     ttk.Checkbutton(frame, text="检测 IP 跳变，变化后须手动确认才能解除拦截", variable=jump).pack(anchor="w", pady=8)
+    allow_unknown = tk.BooleanVar(value=data.get("allow_unknown_ip", False))
+    ttk.Checkbutton(frame, text="无法检测到 IP 时放行（探测失败不中断 Claude）", variable=allow_unknown).pack(anchor="w")
     ttk.Label(frame, text="风险评分模式会向 proxycheck.io 查询出口 IP，评分在有效期内会缓存在本机。", wraplength=620).pack(anchor="w")
     ttk.Label(frame, text="IP 白名单（每行一个 IP 或 CIDR 网段）").pack(anchor="w", pady=(10, 0))
     ips = tk.Text(frame, height=5)
@@ -100,6 +102,7 @@ def show(settings):
             current.update({key: float(var.get()) for key, var in policy_numbers.items()})
             current['access_mode'] = next(key for key, label in access_labels.items() if label == access.get())
             current['detect_ip_change'] = jump.get()
+            current['allow_unknown_ip'] = allow_unknown.get()
             current['cli_http_proxy_enabled'] = cli_proxy.get()
             current['network_guard_enabled'] = system_network.get()
             current.update({"allowed_ips": [x.strip() for x in ips.get("1.0", "end").splitlines() if x.strip()],

@@ -19,7 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from src.ip_checker import fetch_public_ip, is_ip_allowed
 
 DEFAULTS = {"access_mode": "whitelist", "risk_threshold": 50,
-            "risk_cache_ttl": 21600, "detect_ip_change": False, "check_interval": 3}
+            "risk_cache_ttl": 21600, "detect_ip_change": False, "check_interval": 3,
+            "allow_unknown_ip": False}
 
 
 def settings(data):
@@ -32,6 +33,8 @@ def settings(data):
             raise ValueError(f'{field} 须在 {low}～{high} 之间')
     if type(result['detect_ip_change']) is not bool:
         raise ValueError('detect_ip_change 必须是 true 或 false')
+    if type(result.get('allow_unknown_ip')) is not bool:
+        raise ValueError('allow_unknown_ip 必须是 true 或 false')
     mode = result.get('ip_check_mode', 'both')
     result['ip_check_mode'] = 'both' if mode == 'auto' else mode
     if result['ip_check_mode'] not in ('http', 'stun', 'both'):
@@ -165,6 +168,9 @@ def evaluate(data, ips, directory, acknowledge=False, expected_ips=None, now=Non
                 return {**deny('检测到 IP 跳变，已持续拦截。请确认是否信任当前 IP'), 'jump_latched': True, 'jump_details': state.get('jump_details', {})}
             if len(ips) != len(modes):
                 missing = '、'.join(m.upper() for m in modes if m not in ips)
+                if data.get('allow_unknown_ip'):
+                    return {**result, 'state': 'allowed',
+                            'reason': f'未获取到 {missing} 出口 IP，按设置放行', 'error': None}
                 return deny(f'未获取到 {missing} 出口 IP，暂不放行。请检查代理连接或稍后重新检测')
             if acknowledge:
                 state['jump_latched'] = False
@@ -224,4 +230,7 @@ def check(data, directory, acknowledge=False, expected_ips=None):
             return evaluate(data, {}, directory)
         return evaluate(data, detect(data), directory, acknowledge, expected_ips)
     except Exception as exc:
+        if isinstance(data, dict) and data.get('allow_unknown_ip') is True:
+            return {'state': 'allowed', 'ip': None, 'scores': {}, 'detected_ips': {},
+                    'reason': '出口检测失败，按设置放行', 'error': None}
         return {'state': 'blocked', 'ip': None, 'scores': {}, 'detected_ips': {}, 'reason': '出口检测失败，暂不放行', 'error': str(exc)}
