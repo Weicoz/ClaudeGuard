@@ -151,6 +151,7 @@ chmod 700 "$HOME/Library/Logs/ClaudeGuard"
 info "Installing to ${BOLD}$INSTALL_DIR${RST}"
 mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/src" "$INSTALL_DIR/native"
 cp "$SOURCE_DIR/native/macos_network_helper.py" "$INSTALL_DIR/native/macos_network_helper.py"
+cp "$SOURCE_DIR/native/macos_direct_firewall.py" "$INSTALL_DIR/native/macos_direct_firewall.py"
 /usr/bin/rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '.DS_Store' \
     "$SOURCE_DIR/src/" "$INSTALL_DIR/src/"
 for f in "$SOURCE_DIR/bin/"*; do

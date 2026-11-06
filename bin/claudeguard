@@ -45,7 +45,7 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   remove-ip <ip>       从白名单移除 IP 或网段
   list-ips             查看白名单
   enable-protection    开启防护
-  disable-protection   关闭防护，解除 Claude 访问限制
+  disable-protection   关闭出口检测防护，独立直连防火墙仍保留
 
 更新与模型：
   block-updates        禁止 Claude 自动更新
@@ -58,6 +58,7 @@ ClaudeGuard：按出口 IP 白名单保护 Claude
   launch-desktop       检查出口后启动 Claude 桌面端
   start                启动 ClaudeGuard 轻量后台守护
   settings             按需打开设置，关闭后防护继续运行
+  firewall <命令>      macOS 直连防火墙：install / uninstall / status / verify / preview
   window <命令>        Claude-W 额度、历史、计划及进程管理；window --help 查看全部功能
   stop                 停止后台守护，已有网络限制不会自动解除
   install-cli-wrapper  为 claude 命令安装启动检查
@@ -75,6 +76,9 @@ def main():
         from src.window_manager import main as window_main
         sys.argv = ["claude-w", *sys.argv[2:]]
         raise SystemExit(window_main())
+    if cmd == "firewall":
+        script = os.path.join(PROJECT_DIR, "native", "macos_direct_firewall.py")
+        os.execv(sys.executable, [sys.executable, "-I", script, *(sys.argv[2:] or ["status"])])
     config = ConfigManager()
 
     if cmd == "status":

@@ -7,6 +7,11 @@ HELPER_SYS_DIR="/Library/Application Support/ClaudeGuard"
 HELPER_PLIST="/Library/LaunchDaemons/com.claudeguard.helper.plist"
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# 清理独立直连规则；失败时不停止既有防护或删除安装文件。
+if [ -e "/Library/LaunchDaemons/com.claudeguard.direct-firewall.plist" ] || [ -d "$HELPER_SYS_DIR/DirectFirewall" ]; then
+    sudo /usr/bin/python3 -I "$SOURCE_DIR/native/macos_direct_firewall.py" uninstall
+fi
+
 # Stop both user services before clearing rules; restore them if cleanup fails.
 if [ -f "$MENU_PLIST_PATH" ]; then
     launchctl bootout "gui/$(id -u)/com.claudeguard.menubar" 2>/dev/null || true

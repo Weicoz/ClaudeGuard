@@ -6,6 +6,10 @@ ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护
 
 [English](README.md) | [Русский](README.ru.md)
 
+## Claude 直连防火墙（macOS）
+
+菜单 **设置 → Claude 直连防火墙** 提供安装、卸载、范围预览和状态检查。规则独立于出口探测，退出 ClaudeGuard 或代理后仍保留；不自动安装、不修改 hosts。域名解析地址和三个固定网段的覆盖边界、共享 CDN 连带影响及验收方法见 [直连防火墙说明](docs/direct-firewall.md)。
+
 ## DMG 与 Claude-W
 
 macOS 预览版支持 Apple Silicon（arm64）DMG，镜像内双击安装入口；当前未做 Apple 公证，需要可用的 `/usr/bin/python3`。构建及限制见 [macOS 发行说明](docs/release-macos.md)。

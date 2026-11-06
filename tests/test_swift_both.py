@@ -50,6 +50,11 @@ precondition(AppDelegate.parseHTTPIP(Data("Too many requests".utf8)) == nil)
 precondition(AppDelegate.parseHTTPIP(Data("203.0.113.10".utf8)) == good)
 precondition(AppDelegate.parseHTTPIP(Data("2001:db8::1".utf8)) == "2001:db8::1")
 let native = AppDelegate()
+native.menu = NSMenu()
+native.rebuildMenu()
+let settingsMenu = native.menu.items.first { $0.title == "设置" }!.submenu!
+let firewallMenu = settingsMenu.items.first { $0.title == "Claude 直连防火墙" }!.submenu!
+precondition(firewallMenu.items.compactMap { $0.representedObject as? String } == ["status", "preview", "install", "uninstall", "verify"], "Firewall menu actions are missing or misrouted")
 native.eventLogPath = URL(fileURLWithPath: CommandLine.arguments[2]).deletingLastPathComponent().appendingPathComponent("events.jsonl").path
 native.logEvent("test_event", fields: ["reason": "测试"])
 let log = try! String(contentsOfFile: native.eventLogPath, encoding: .utf8)

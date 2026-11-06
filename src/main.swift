@@ -1273,6 +1273,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         proxyAddress.target = self
         settingsMenu.addItem(proxyAddress)
         settingsMenu.addItem(.separator())
+        let firewallItem = NSMenuItem(title: "Claude 直连防火墙", action: nil, keyEquivalent: "")
+        let firewallMenu = NSMenu()
+        for (title, action) in [("查看安装状态", "status"), ("查看规则范围", "preview"),
+                                ("安装直连防火墙…", "install"), ("卸载直连防火墙…", "uninstall"),
+                                ("检查实际 PF 状态…", "verify")] {
+            let item = NSMenuItem(title: title, action: #selector(onFirewallAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action
+            item.isEnabled = !settingsBusy
+            firewallMenu.addItem(item)
+        }
+        firewallItem.submenu = firewallMenu
+        settingsMenu.addItem(firewallItem)
+        settingsMenu.addItem(.separator())
         let interval = NSMenuItem(title: "轮询间隔：\(checkInterval) 秒…", action: #selector(onCheckInterval), keyEquivalent: "")
         interval.target = self
         settingsMenu.addItem(interval)
@@ -1351,7 +1365,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func onWindowAction(_ sender: NSMenuItem) {
         guard let args = sender.representedObject as? [String] else { return }
-        runWindowCommand(args)
+        runToolCommand(args)
+    }
+
+    @objc func onFirewallAction(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? String else { return }
+        runToolCommand(["firewall", action], tool: "claudeguard", title: "Claude 直连防火墙")
     }
 
     @objc func onWindowCommand() {
@@ -1364,10 +1383,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "下一步")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        runWindowCommand(input.stringValue.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+        runToolCommand(input.stringValue.split(whereSeparator: { $0.isWhitespace }).map(String.init))
     }
 
-    func runWindowCommand(_ args: [String]) {
+    func runToolCommand(_ args: [String], tool: String = "claude-w", title: String = "Claude-W 执行结果") {
         guard !args.isEmpty, !settingsBusy else { return }
         let preview = args.contains("--dry-run")
         let action = args[0]
@@ -1384,7 +1403,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            process.arguments = [NSString(string: "~/.local/share/ClaudeGuard/bin/claude-w").expandingTildeInPath] + args
+            process.arguments = [NSString(string: "~/.local/share/ClaudeGuard/bin/\(tool)").expandingTildeInPath] + args
             let output = Pipe()
             process.standardOutput = output
             process.standardError = output
@@ -1394,10 +1413,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 text = String(data: data, encoding: .utf8) ?? "无法读取结果"
-            } catch { text = "窗口管理启动失败：\(error.localizedDescription)" }
+            } catch { text = "工具启动失败：\(error.localizedDescription)" }
             DispatchQueue.main.async {
                 let notice = NSAlert()
-                notice.messageText = "Claude-W 执行结果"
+                notice.messageText = title
                 notice.informativeText = text.isEmpty ? "命令已结束，无输出。" : text
                 notice.addButton(withTitle: "关闭")
                 notice.runModal()
