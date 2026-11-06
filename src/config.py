@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import copy
+import tempfile
 from src.policy import DEFAULTS as POLICY_DEFAULTS, atomic_json, settings as policy_settings
 
 CONFIG_DIR = os.path.expanduser("~/.config/claudeguard")
@@ -98,11 +99,28 @@ class ConfigManager:
 
     @property
     def protection_enabled(self):
-        return self.config.get("protection_enabled", True) is not False
+        return self.config.get("network_protection_enabled", self.config.get("protection_enabled", True)) is not False
 
     @protection_enabled.setter
     def protection_enabled(self, val):
-        self.config["protection_enabled"] = bool(val)
+        if "network_protection_enabled" in self.config:
+            self.config["network_protection_enabled"] = bool(val)
+            self.config["protection_enabled"] = False
+        else:
+            self.config["protection_enabled"] = bool(val)
+        self.save_config()
+
+    def migrate_network_only(self):
+        policy_settings(self.config)
+        if "network_protection_enabled" in self.config and self.config.get("protection_enabled") is False:
+            return
+        fd, _ = tempfile.mkstemp(prefix="config-before-network-only-", suffix=".json", dir=os.path.dirname(self.path))
+        with os.fdopen(fd, "wb") as backup, open(self.path, "rb") as original:
+            backup.write(original.read())
+        enabled = self.protection_enabled
+        self.config["network_protection_enabled"] = enabled
+        # 旧会话的已加载监控只读取旧字段；停用其杀进程路径，新字段保留网络策略。
+        self.config["protection_enabled"] = False
         self.save_config()
 
     @property

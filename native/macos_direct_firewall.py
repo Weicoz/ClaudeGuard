@@ -22,7 +22,8 @@ import time
 ROOT = Path('/Library/Application Support/ClaudeGuard/DirectFirewall')
 PLIST = Path('/Library/LaunchDaemons/com.claudeguard.direct-firewall.plist')
 LABEL = 'com.claudeguard.direct-firewall'
-ANCHOR = 'com.apple/claudeguard-direct'
+PARENT_ANCHOR = 'com.apple/claudeguard'
+ANCHOR = PARENT_ANCHOR + '/direct'
 TABLE = 'claudeguard_direct'
 NETWORKS = ('160.79.104.0/21', '153.61.224.0/22', '2607:6bc0::/32')
 # shortcut: 仅维护列明域名的解析 IP；未知子域名零遗漏需域名感知的出站过滤器。
@@ -166,8 +167,11 @@ class Firewall:
 
     def require_anchor(self):
         rules = self.pf('-sr').stdout
-        if not re.search(r'(?m)^\s*anchor\s+"com\.apple/(?:\*|claudeguard-direct)"(?:\s+all)?\s*$', rules):
+        if not re.search(r'(?m)^\s*anchor\s+"com\.apple/(?:\*|claudeguard)"(?:\s+all)?\s*$', rules):
             raise RuntimeError('系统 PF 缺少专属锚点入口，未重载全局规则')
+        parent = self.pf('-a', PARENT_ANCHOR, '-sr').stdout
+        if not re.search(r'(?m)^\s*anchor\s+"(?:direct|/com\.apple/claudeguard/direct)"(?:\s+all)?\s*$', parent):
+            raise RuntimeError('请先更新 ClaudeGuard 系统助手并重新检测，建立 direct 子锚点入口')
 
     def apply(self, seen, missing):
         self.require_anchor()

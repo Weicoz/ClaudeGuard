@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Pre-flight interceptor for the `claude` CLI. Checks the verdict before
-launch and keeps re-checking for the lifetime of the session; kills it if the
-IP leaves the whitelist. Hands off to the real `claude` when allowed."""
+"""启动前确认网络规则；会话运行期间只切换网络限制，不终止 Claude。"""
 import sys
 import os
 import subprocess
 import signal
 import threading
-import time
 
 # Importable via the install symlink too.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..")))
@@ -104,11 +101,8 @@ def main():
     run_real_claude(config)
 
 def monitor_and_enforce(config, proc, stop_event, block_info):
-    """Re-checks the verdict for the child's lifetime; kills it on a confirmed
-    "blocked". The banner is NOT printed here (Claude owns the TUI and would
-    swallow it) — we stash details in block_info and let the main thread print
-    after Claude exits. On "offline" we do nothing: no point killing a session
-    over a Wi-Fi blip."""
+    """切换已确认的网络限制；复检时保留原规则，不终止进程或重置终端。"""
+    last_applied = None
     while not stop_event.wait(config.check_interval):
         if proc.poll() is not None:
             return  # child already exited on its own
@@ -117,24 +111,19 @@ def monitor_and_enforce(config, proc, stop_event, block_info):
         if not config.protection_enabled:
             continue
 
-        verdict, ip, err = get_verdict(config)
-        if verdict != "blocked":
+        verdict, _, _ = get_verdict(config)
+        if verdict == "offline":
             continue
-
-        block_info["blocked"] = True
-        block_info["ip"] = ip
-        block_info["err"] = err
-        try:
-            proc.terminate()
-            for _ in range(10):
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-            if proc.poll() is None:
-                proc.kill()
-        except Exception:
-            pass
-        return
+        want_blocked = verdict != "allowed"
+        if want_blocked == last_applied:
+            continue
+        ok, message = sync_hosts_file(block_claude_domains=want_blocked,
+                                      block_update_domains=config.block_auto_updates, config=config)
+        if ok:
+            last_applied = want_blocked
+            block_info["network_blocked"] = want_blocked
+        else:
+            block_info["network_error"] = message
 
 def run_real_claude(config):
     # The recorded path is version-stamped on Homebrew, so an update deletes it.
@@ -165,7 +154,7 @@ def run_real_claude(config):
         args = [real_path] + sys.argv[1:]
 
     stop_event = threading.Event()
-    block_info = {"blocked": False, "ip": None, "err": None}
+    block_info = {}
     rc = 0
 
     try:
@@ -182,25 +171,6 @@ def run_real_claude(config):
     finally:
         stop_event.set()
         force_restore_terminal()
-
-    # Show the banner AFTER the terminal is restored. Two blocked paths:
-    #   1. monitor caught it and killed the session (block_info set);
-    #   2. Claude quit on its own the instant the network was cut, before the
-    #      next tick (block_info unset) — caught by re-verifying on any abnormal
-    #      exit. Clean exits (rc == 0) skip the check, so healthy sessions pay
-    #      nothing and never see a spurious banner.
-    banner_ip, banner_err = None, None
-    if block_info["blocked"]:
-        banner_ip, banner_err = block_info["ip"], block_info["err"]
-    elif config.protection_enabled and rc != 0:
-        config.config = config.load_config()
-        verdict, ip, err = get_verdict(config)
-        if verdict == "blocked":
-            banner_ip, banner_err = ip, err
-
-    if banner_ip is not None:
-        print_block_banner(banner_ip, banner_err, "出口未通过访问检查，Claude Code 已停止运行")
-        sys.exit(1)
 
     sys.exit(rc)
 

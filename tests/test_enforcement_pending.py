@@ -64,7 +64,7 @@ class PendingEnforcementTests(unittest.TestCase):
         child.poll.side_effect = [None, None, 0]
         confirmed = {**self.snapshot, 'state': 'allowed', 'enforcement_confirmed': True}
         info = {'blocked': False}
-        with patch.object(brain, 'read_daemon_state', side_effect=[self.snapshot, confirmed]):
+        with patch.object(brain, 'read_daemon_state', side_effect=[self.snapshot, confirmed]), patch.object(cli_wrapper, 'sync_hosts_file', return_value=(True, 'ok')):
             cli_wrapper.monitor_and_enforce(self.config, child, stop, info)
         child.terminate.assert_not_called()
         child.kill.assert_not_called()
@@ -72,17 +72,19 @@ class PendingEnforcementTests(unittest.TestCase):
         self.assertEqual(stop.wait.call_count, 3)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'macOS CLI wrapper')
-    def test_live_monitor_still_stops_on_real_failure(self):
+    def test_live_monitor_blocks_network_on_real_failure_without_stopping(self):
         from src import cli_wrapper
         self.config.save_config()
-        stop = Mock(); stop.wait.return_value = False
-        child = Mock(); child.poll.side_effect = [None, 0, 0]
+        stop = Mock(); stop.wait.side_effect = [False, True]
+        child = Mock(); child.poll.return_value = None
         info = {'blocked': False}
         failed = {**self.snapshot, 'enforcement_error': '助手失败'}
-        with patch.object(brain, 'read_daemon_state', return_value=failed):
+        with patch.object(brain, 'read_daemon_state', return_value=failed), patch.object(cli_wrapper, 'sync_hosts_file', return_value=(True, 'ok')) as network:
             cli_wrapper.monitor_and_enforce(self.config, child, stop, info)
-        child.terminate.assert_called_once()
-        self.assertTrue(info['blocked'])
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+        self.assertTrue(info['network_blocked'])
+        network.assert_called_once()
 
     @unittest.skipUnless(sys.platform == 'darwin', 'macOS CLI wrapper')
     def test_abnormal_exit_during_pending_is_not_reported_as_policy_denial(self):

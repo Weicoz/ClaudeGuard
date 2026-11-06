@@ -1,11 +1,13 @@
 # macOS DMG 发行
 
+`0.1.0-beta.5` 安装包同时包含直连防火墙菜单和仅阻断网络模式：复检、策略拒绝或系统执行失败不会自动终止已有桌面端与 CLI；新启动仍需通过检查。安装器备份并迁移网络开关，停用旧包装器的自动杀进程监控，保留现有会话。显式终止命令保持独立。
+
 `0.1.0-beta.4` 源码加入可选直连防火墙：设置菜单可以安装、卸载并检查专属 PF 规则，默认不安装。范围与验证边界见 [直连防火墙](direct-firewall.md)。构建新 DMG 不代表已发布 GitHub Release 或替换本机安装。
 
 当前源码只构建 Apple Silicon（arm64），最低 macOS 13。Intel 不在支持范围。
 
 ```bash
-python3 scripts/build-dmg.py --version 0.1.0-beta.4
+python3 scripts/build-dmg.py --version 0.1.0-beta.5
 ```
 
 输出位于 `dist/`：arm64 DMG 和 `SHA256SUMS`。镜像包含预编译程序、运行源码、图标、许可证、卸载脚本、安装入口和逐文件清单，不包含本机配置、凭据或请求历史。当前发行版本为 `v0.1.0-beta.3`；`v0.1.0-beta.1` 不包含本轮修复。此前的 `audit.1` 仅是本地审查候选。

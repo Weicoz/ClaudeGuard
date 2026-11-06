@@ -27,7 +27,7 @@ class BenchmarkGuard: AppDelegate {
         return exits
     }
     override func apply(from previous: GuardState, to new: GuardState) { enforcementConfirmed = true }
-    override func setupAppLaunchInterceptor() {}
+    override func setupAppNetworkObserver() {}
     override func runHelper(_ cmd: String, _ a1: String, _ a2: String) -> Process? {
         helperRequests += 1
         let task = Process()

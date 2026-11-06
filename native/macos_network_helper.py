@@ -159,12 +159,13 @@ class Worker:
         token = lease.get('token', '')
         if not isinstance(token, str) or (token and not re.fullmatch('[0-9]{1,20}', token)):
             raise ValueError('invalid PF enable token')
+        rules_path = self.root / 'pf.verified'
         if request['block_claude_domains']:
             if not re.search(r'\banchor\s+"com\.apple/(?:\*|claudeguard)"', rules):
                 raise RuntimeError('main PF ruleset does not reference the ClaudeGuard anchor')
-            rules_path = self.root / 'pf.verified'
             text = 'table <claude_guard> persist { ' + ' '.join(request['ip_addresses']) + ' }\n'
             text += 'block drop out quick proto { tcp, udp } to <claude_guard>\n'
+            text += 'anchor "direct"\n'
             atomic_text(rules_path, text)
             try:
                 self.pf('-a', ANCHOR, '-f', str(rules_path))
@@ -184,8 +185,13 @@ class Worker:
                 self.pf('-k', '::/0' if ':' in address else '0.0.0.0/0', '-k', address)
             atomic_text(self.hosts, content, 0o644)
         else:
+            # 放行风险检测规则时，独立直连防火墙仍通过子锚点执行。
+            atomic_text(rules_path, 'anchor "direct"\n')
+            try:
+                self.pf('-a', ANCHOR, '-f', str(rules_path))
+            finally:
+                rules_path.unlink(missing_ok=True)
             atomic_text(self.hosts, content, 0o644)
-            self.pf('-a', ANCHOR, '-F', 'rules')
             if token_path.exists():
                 if token and lease.get('boot') == boot:
                     self.pf('-X', token)

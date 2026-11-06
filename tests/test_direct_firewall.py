@@ -69,6 +69,8 @@ class DirectFirewallTests(unittest.TestCase):
                 flags = args[1:]
                 if flags == ('-sr',):
                     stdout = 'anchor "com.apple/*" all\n'
+                elif flags == ('-a', firewall.PARENT_ANCHOR, '-sr'):
+                    stdout = 'anchor "direct" all\n'
                 elif flags == ('-si',):
                     stdout = 'Status: ' + ('Enabled' if self.enabled else 'Disabled')
                 elif flags == ('-E',):

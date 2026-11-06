@@ -26,9 +26,11 @@ DEFAULTS = {"access_mode": "whitelist", "risk_threshold": 50,
 
 def settings(data):
     result = {**DEFAULTS, **data}
-    for key in ('protection_enabled', 'block_auto_updates', 'model_override_enabled', 'network_guard_enabled'):
+    for key in ('protection_enabled', 'network_protection_enabled', 'block_auto_updates', 'model_override_enabled', 'network_guard_enabled'):
         if key in result and type(result[key]) is not bool:
             raise ValueError(f'{key} 必须是 true 或 false')
+    if 'network_protection_enabled' in result:
+        result['protection_enabled'] = result['network_protection_enabled']
     entries = result.get('allowed_ips', [])
     if not isinstance(entries, list) or any(not isinstance(ip, str) for ip in entries):
         raise ValueError('allowed_ips 必须是 IP 或 CIDR 网段列表')

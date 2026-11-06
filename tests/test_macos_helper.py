@@ -57,6 +57,21 @@ class MacOSHelperTests(unittest.TestCase):
         self.assertIn(('/sbin/pfctl', '-X', '123456'), self.calls)
         self.assertEqual(self.hosts.read_text(), '127.0.0.1 localhost\n10.0.0.1 unrelated.local\n')
 
+    def test_allowing_network_preserves_independent_direct_firewall_hook(self):
+        loaded = []
+        original = self.worker.command
+        def capture(*args):
+            if '-f' in args:
+                loaded.append(Path(args[-1]).read_text())
+            return original(*args)
+        self.worker.command = capture
+        self.submit()
+        self.request.update(request_id='b' * 32, block_claude_domains=False, block_update_domains=False)
+        self.submit()
+        self.assertEqual(len(loaded), 2)
+        self.assertTrue(all('anchor "direct"' in text for text in loaded))
+        self.assertNotIn(('/sbin/pfctl', '-a', helper.ANCHOR, '-F', 'rules'), self.calls)
+
     def test_unprivileged_payload_cannot_write_other_hosts_or_pf_rules(self):
         with self.assertRaises(ValueError):
             helper.checked_directory(self.config, os.getuid() + 1)

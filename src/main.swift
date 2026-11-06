@@ -6,10 +6,8 @@ import Network
 // ClaudeGuard background guard with a separate resident AppKit menu bar.
 //
 // State machine: compute one GuardState, touch the system only on transitions
-// (blocking/unblocking domains, killing the app, alerting) — never on every
-// poll. Owns two enforcement surfaces: the Claude Desktop app (force-quit +
-// alert) and the claude/anthropic domains (/etc/hosts + pf). The `claude` CLI
-// enforces itself from src/cli_wrapper.py — a background daemon has no terminal.
+// 网络规则按状态变化应用；自动防护不终止桌面端或 CLI。
+// 新启动仍需通过检查，显式终止命令与网络策略分开执行。
 
 enum GuardState: Equatable {
     case disabled              // protection off
@@ -176,8 +174,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // applied, force a first apply.
     var lastAppliedDomainsBlocked: Bool? = nil
     var lastAppliedBlockUpdates: Bool? = nil
-    // Alerted once for the current blocked episode (reset on leaving blocked).
-    var hasAlertedThisBlock: Bool = false
 
     // MARK: - Lifecycle
 
@@ -256,7 +252,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         logEvent("guard_started", fields: ["mode": ipCheckMode, "check_interval": initialInterval])
         if !headless { rebuildMenu() }
 
-        setupAppLaunchInterceptor()
+        setupAppNetworkObserver()
 
         // Bring the network monitors up first so no early Wi-Fi/VPN transition
         // is missed, then verify. State is unknown until the first check returns.
@@ -416,24 +412,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: - Desktop app launch interceptor
+    // MARK: - Desktop app network observer
 
-    func setupAppLaunchInterceptor() {
+    func setupAppNetworkObserver() {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let self = self else { return }
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             if Self.isClaudeDesktop(app) {
-                self.checkLock.lock()
-                let verified = self.launchState
-                let checkedData = self.launchConfigData
-                self.checkLock.unlock()
-                if checkedData != nil, checkedData == (try? self.boundedData(at: URL(fileURLWithPath: self.configPath))) {
-                    if case .allowed = verified { return }
-                    if case .disabled = verified { return }
-                }
-                self.logEvent("desktop_launch_blocked")
-                app.forceTerminate()
-                self.showBlockedAlert(reason: "当前出口或系统防护尚未确认，请重新检测后再启动。")
+                self.recheckAsync()
             }
         }
     }
@@ -606,15 +592,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The only place that touches the system. Each piece runs only when its
     /// input actually changed.
     func apply(from previous: GuardState, to new: GuardState) {
-        // Close denied Desktop sessions before DNS and privileged work can delay enforcement.
-        if new.domainsShouldBeBlocked {
-            let killed = killDesktopIfRunning()
-            if killed { logEvent("desktop_closed", fields: ["reason": policyReason, "ip": currentIP]) }
-            if killed && !hasAlertedThisBlock {
-                hasAlertedThisBlock = true
-                showBlockedAlert(reason: policyReason.isEmpty ? "当前出口未通过检查。" : policyReason)
-            }
-        } else { hasAlertedThisBlock = false }
+        // 自动防护只切换网络规则；保留桌面端和 CLI，会话终止仅由显式命令触发。
         if hostsDrifted() {
             lastAppliedDomainsBlocked = nil
             lastAppliedHostsUpdates = nil
@@ -976,7 +954,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let alert = NSAlert()
             alert.alertStyle = .critical
             alert.messageText = "ClaudeGuard 已拦截"
-            alert.informativeText = "Claude 桌面端已关闭。\n\n\(reason)"
+            alert.informativeText = "Claude 网络访问受限，会话保持打开。\n\n\(reason)"
             alert.addButton(withTitle: "知道了")
             alert.window.level = .floating
             alert.runModal()
@@ -1045,7 +1023,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         allowedIPs = json["allowed_ips"] as? [String] ?? []
         let mode = json["ip_check_mode"] as? String ?? "both"
         ipCheckMode = mode == "auto" ? "both" : mode
-        protectionEnabled = configIsValid ? (json["protection_enabled"] as? Bool ?? true) : true
+        protectionEnabled = configIsValid ? (json["network_protection_enabled"] as? Bool ?? json["protection_enabled"] as? Bool ?? true) : true
         blockAutoUpdates = configIsValid ? (json["block_auto_updates"] as? Bool ?? true) : true
         modelOverrideEnabled = json["model_override_enabled"] as? Bool ?? false
         defaultModel = json["default_model"] as? String ?? "claude-opus-4-8"
@@ -1060,7 +1038,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         json["allowed_ips"] = allowedIPs
         json["ip_check_mode"] = ipCheckMode
-        json["protection_enabled"] = protectionEnabled
+        if json["network_protection_enabled"] != nil {
+            json["network_protection_enabled"] = protectionEnabled
+            json["protection_enabled"] = false
+        } else { json["protection_enabled"] = protectionEnabled }
         json["block_auto_updates"] = blockAutoUpdates
         json["model_override_enabled"] = modelOverrideEnabled
         json["default_model"] = defaultModel

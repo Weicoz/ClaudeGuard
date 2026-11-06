@@ -191,8 +191,9 @@ precondition(AppDelegate.parseStun(Array(packet.dropLast()), transactionID: tran
 class EnforcementProbe: AppDelegate {
     var succeeds = false
     var hostCalls = 0
+    var automaticCloses = 0
     override func hostsDrifted() -> Bool { false }
-    override func killDesktopIfRunning() -> Bool { false }
+    override func killDesktopIfRunning() -> Bool { automaticCloses += 1; return false }
     override func helperSucceeded(_ cmd: String, _ a1: String, _ a2: String) -> Bool {
         if cmd == "sync_hosts" { hostCalls += 1 }
         return succeeds
@@ -207,9 +208,18 @@ enforcement.succeeds = true
 enforcement.apply(from: .offline, to: .allowed(ip: good))
 enforcement.apply(from: .offline, to: .allowed(ip: good))
 precondition(enforcement.hostCalls == 3 && enforcement.enforcementConfirmed, "Successful operations repeated at every poll")
+enforcement.apply(from: .allowed(ip: good), to: .blocked(ip: bad))
+enforcement.apply(from: .blocked(ip: bad), to: .offline)
+precondition(enforcement.automaticCloses == 0 && enforcement.enforcementConfirmed, "Automatic protection terminated a Desktop session")
 try! JSONSerialization.data(withJSONObject: ["protection_enabled": false, "allowed_ips": [good]]).write(to: URL(fileURLWithPath: native.configPath))
 native.loadConfig()
 precondition(native.configIsValid && !native.protectionEnabled)
+try! JSONSerialization.data(withJSONObject: ["protection_enabled": false, "network_protection_enabled": true, "allowed_ips": [good]]).write(to: URL(fileURLWithPath: native.configPath))
+native.loadConfig()
+precondition(native.configIsValid && native.protectionEnabled, "Legacy monitor compatibility disabled network protection")
+native.saveConfig()
+let networkOnlyConfig = try! JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: native.configPath))) as! [String: Any]
+precondition(networkOnlyConfig["protection_enabled"] as? Bool == false && networkOnlyConfig["network_protection_enabled"] as? Bool == true)
 try! JSONSerialization.data(withJSONObject: ["protection_enabled": 0, "allowed_ips": [good]]).write(to: URL(fileURLWithPath: native.configPath))
 native.loadConfig()
 precondition(!native.configIsValid && native.protectionEnabled, "Numeric zero disabled protection")

@@ -1,6 +1,6 @@
 # ClaudeGuard 中文版
 
-ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护检测出口，菜单栏盾牌常驻显示。它检查当前公网出口是否在你设置的白名单中，通过后才允许启动 Claude 桌面端或 Claude Code。检测到出口不符合要求时，会关闭对应会话，并阻断相关域名的连接。
+ClaudeGuard 是一个 Claude 出口防护工具。macOS 版由轻量后台守护检测出口，菜单栏盾牌常驻显示。新启动仍需通过访问与系统执行检查；已有会话遇到出口不符合要求时，只阻断网络，保留桌面端与 Claude Code，不自动结束进程。菜单中的显式终止命令保持独立。
 
 本项目基于 [ivblz/ClaudeGuard](https://github.com/ivblz/ClaudeGuard) 修改，增加了可选择的出口检测方式，并将菜单、弹窗和命令行提示改为中文。保留原项目的 MIT 许可证。
 

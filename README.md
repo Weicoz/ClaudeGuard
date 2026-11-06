@@ -4,7 +4,7 @@
 
 **A VPN-whitelist guard for Claude on macOS.**
 
-Blocks the **Claude Desktop** app, the **Claude Code CLI** (`claude`) and every Claude/Anthropic domain (`claude.ai`, `claude.com`, `anthropic.com` and all their subdomains) whenever your public IP is not on your VPN whitelist - so you never touch Claude from the wrong region by accident.
+macOS 自动防护只限制 Claude 网络连接，保留已打开的桌面端和 CLI 会话；新启动仍需通过检查。可选直连防火墙的范围与限制见 [中文说明](docs/direct-firewall.md)，不保证覆盖任意未知子域名。
 
 [简体中文](README.zh-CN.md) | **English** | [Русский](README.ru.md)
 
@@ -122,7 +122,7 @@ it immediately) at any time.
 1. **Selectable IP detection** - `http` queries only HTTP services, `stun` queries only UDP STUN. The default `both` checks HTTP and STUN independently and allows access only when both exits are whitelisted, regardless of response order. Legacy `auto` configurations are treated as `both`.
 2. **The brain** (`src/brain.py`) turns that IP into one verdict - `allowed` / `blocked` / `offline` - and it **fails closed**: only a confirmed `allowed` lets Claude run.
 3. **Single source of truth** - the background daemon writes its verdict to `~/.config/claudeguard/state.json` on every check. The CLI wrapper and app launcher read it (instant), and fall back to their own check if the daemon is down, its state is stale, or its detection mode / whitelist differs from the current configuration.
-4. **Enforcement** - the whole Claude/Anthropic domain family (~175 hosts across 5 apex domains) is blocked via `/etc/hosts` + a pf firewall rule (TCP + UDP/QUIC); the desktop app is force-quit with an alert; a running `claude` session is killed the moment the IP leaves the whitelist.
+4. **网络执行（macOS）** - 使用 hosts 与专属 PF 规则限制网络，不自动关闭桌面端或已有 CLI。安装时迁移旧监控开关，保留升级前已打开的会话；显式终止命令保持独立。
 
 > **Scope:** this is accidental-leak protection for your own machine, not a defense against a malicious admin. The truly unbypassable layer (a Network Extension content filter) requires a paid Apple Developer account; the on-device approach here is the free ceiling and covers accidental leaks well.
 
