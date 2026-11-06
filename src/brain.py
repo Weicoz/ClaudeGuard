@@ -79,6 +79,10 @@ def get_verdict(config, timeout=2.0, allow_fallback=True):
 
     st = read_daemon_state()
     if st is not None and st.get('enforcement_confirmed') is False:
+        # Rechecks publish a pending snapshot before applying rules; monitors
+        # already distinguish unverified/offline from a definite denial.
+        if st.get('enforcement_error') == '' and st.get('state') in ('allowed', 'offline'):
+            return 'offline', st.get('ip'), '系统防护正在重新确认，暂不允许新启动'
         return 'blocked', st.get('ip'), '系统防护执行未确认，请查看守护日志'
     if policy.advanced(config.config):
         if not allow_fallback and (st is None or not _same_policy(st.get('policy_config'), config.config)):
