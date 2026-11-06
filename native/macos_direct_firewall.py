@@ -105,18 +105,23 @@ def resolve_domain(domain):
     successful = True
     for kind in ('A', 'AAAA'):
         answered = False
-        for resolver in ('1.1.1.1', '8.8.8.8'):
-            try:
-                result = subprocess.run(['/usr/bin/dig', '@' + resolver, '+noall', '+comments', '+answer', '+tcp',
-                                         '+time=1', '+tries=1', kind, domain],
-                                        capture_output=True, text=True, timeout=3)
-            except subprocess.SubprocessError:
-                continue
-            if result.returncode == 0 and re.search(r'status: (?:NOERROR|NXDOMAIN),', result.stdout):
-                found.update(public_addresses(line.split()[-1] for line in result.stdout.splitlines()
-                                              if line.strip() and not line.startswith(';')))
-                answered = True
-                break
+        try:
+            # TUN 会劫持发往公共 DNS 的 TCP 查询；HTTPS 校验证书后读取真实答案。
+            result = subprocess.run(['/usr/bin/curl', '--noproxy', '*', '--fail', '--silent', '--show-error',
+                                     '--proto', '=https', '--max-time', '5',
+                                     f'https://dns.google/resolve?name={domain}&type={kind}&edns_client_subnet=0.0.0.0/0'],
+                                    capture_output=True, text=True, timeout=7)
+            data = json.loads(result.stdout) if result.returncode == 0 else {}
+            if isinstance(data, dict) and data.get('Status') in (0, 3) and not data.get('TC', False):
+                records = data.get('Answer', [])
+                if isinstance(records, list) and all(isinstance(record, dict) for record in records):
+                    values = [record.get('data', '') for record in records
+                              if record.get('type') == (1 if kind == 'A' else 28)]
+                    addresses = public_addresses(values)
+                    answered = len(addresses) == len(set(values))
+                    found.update(addresses)
+        except (subprocess.SubprocessError, ValueError, TypeError):
+            pass
         successful = successful and answered
     return domain, found, successful
 

@@ -55,7 +55,7 @@ datadoghq.com
 
 ## 维护与卸载
 
-独立 root LaunchDaemon 每 5 分钟维护地址和接口；不是常驻 Python 进程。用 `dig` 向 `1.1.1.1` 查询，失败再尝试 `8.8.8.8`，只接收公网 A/AAAA 地址。网络失败时保留旧地址；完整解析成功后，超过 24 小时未再次观察到的旧地址才过期。新网卡在下一轮维护后覆盖，期间存在窗口。
+独立 root LaunchDaemon 每 5 分钟维护地址和接口；不是常驻 Python 进程。通过校验证书的 [Google DNS HTTPS JSON 接口](https://developers.google.com/speed/public-dns/docs/doh/json)查询公网 A/AAAA 地址，避开 TUN 对普通 DNS 的 Fake-IP 劫持；不接受私有或假地址。网络失败时保留旧地址；完整解析成功后，超过 24 小时未再次观察到的旧地址才过期。新网卡在下一轮维护后覆盖，期间存在窗口。
 
 安装路径为 `/Library/Application Support/ClaudeGuard/DirectFirewall`，启动项为 `/Library/LaunchDaemons/com.claudeguard.direct-firewall.plist`。使用 `com.apple/claudeguard/direct` 子锚点、`claudeguard_direct` 表和当前启动会话自身的 PF enable token。父锚点由 ClaudeGuard 系统助手维护，在放行和阻断两种状态下都保留 `anchor "direct"`。不重载 `/etc/pf.conf`，不关闭全局 PF，不改网络共享等其他主规则。
 

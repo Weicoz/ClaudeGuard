@@ -38,13 +38,23 @@ class DirectFirewallTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_dns_nxdomain_is_not_a_transport_failure(self):
-        result = SimpleNamespace(returncode=0, stdout=';; ->>HEADER<<- opcode: QUERY, status: NXDOMAIN, id: 1\n')
+        result = SimpleNamespace(returncode=0, stdout='{"Status": 3}')
         with patch.object(firewall.subprocess, 'run', return_value=result):
             self.assertEqual(firewall.resolve_domain('claude.app'), ('claude.app', set(), True))
-        result.stdout = ';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1\nclaude.ai. 60 IN A 160.79.104.10\n'
+        result.stdout = '{"Status": 0, "Answer": [{"type": 1, "data": "160.79.104.10"}]}'
         with patch.object(firewall.subprocess, 'run', return_value=result):
             self.assertEqual(firewall.resolve_domain('claude.ai'), ('claude.ai', {'160.79.104.10'}, True))
         self.assertEqual(firewall.target_networks(['160.79.104.10']), list(firewall.NETWORKS))
+
+    def test_dns_rejects_fake_addresses_and_bad_https_answers(self):
+        for response in ('{"Status": 0, "Answer": [{"type": 1, "data": "198.18.0.8"}]}',
+                         '{"Status": 2}', '{"Status": 0, "TC": true}', 'not json', '[]'):
+            result = SimpleNamespace(returncode=0, stdout=response)
+            with patch.object(firewall.subprocess, 'run', return_value=result) as run:
+                domain, addresses, successful = firewall.resolve_domain('claude.ai')
+                self.assertFalse(successful)
+                self.assertFalse(addresses)
+                self.assertIn('--proto', run.call_args.args[0])
 
     def test_physical_interfaces_exclude_tunnels_and_loopback(self):
         with patch.object(firewall.socket, 'if_nameindex', return_value=[(1, 'lo0'), (2, 'en0'), (3, 'utun0'), (4, 'bridge0')]):
