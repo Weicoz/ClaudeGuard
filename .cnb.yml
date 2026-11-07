@@ -1,0 +1,63 @@
+main:
+  push:
+    - docker:
+        image: python:3.10
+      stages:
+        - name: 安装 Linux GUI 与网络工具
+          script: "apt-get update && apt-get install -y --no-install-recommends xvfb xauth python3-tk nftables"
+        - name: 安装依赖
+          script: "python -m pip install -r portable/requirements.txt"
+        - name: 测试含 GUI
+          script: "NO_PROXY=* no_proxy=* xvfb-run -a python -m unittest discover -s tests -v"
+        - name: 安装脚本语法
+          script: "bash -n scripts/install-linux.sh scripts/uninstall-linux.sh"
+        - name: 安装冒烟测试
+          script: "bash scripts/install-linux.sh && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json set ip_check_mode http && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json add-ip 203.0.113.10"
+    - docker:
+        image: python:3.12
+      services:
+        - docker
+      stages:
+        - name: 安装 Linux GUI 与网络工具
+          script: "apt-get update && apt-get install -y --no-install-recommends xvfb xauth python3-tk nftables"
+        - name: 安装依赖
+          script: "python -m pip install -r portable/requirements.txt"
+        - name: 测试含 GUI
+          script: "NO_PROXY=* no_proxy=* xvfb-run -a python -m unittest discover -s tests -v"
+        - name: 安装脚本语法
+          script: "bash -n scripts/install-linux.sh scripts/uninstall-linux.sh"
+        - name: 安装冒烟测试
+          script: "bash scripts/install-linux.sh && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json set ip_check_mode http && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json add-ip 203.0.113.10"
+        - name: 隔离容器内核网络测试
+          script: "docker run --rm --privileged -v \"$PWD:/workspace\" -w /workspace python:3.12 bash -c 'apt-get update -qq && apt-get install -y --no-install-recommends nftables && python tests/integration/linux_network.py'"
+  pull_request:
+    - docker:
+        image: python:3.10
+      stages:
+        - name: 安装 Linux GUI 与网络工具
+          script: "apt-get update && apt-get install -y --no-install-recommends xvfb xauth python3-tk nftables"
+        - name: 安装依赖
+          script: "python -m pip install -r portable/requirements.txt"
+        - name: 测试含 GUI
+          script: "NO_PROXY=* no_proxy=* xvfb-run -a python -m unittest discover -s tests -v"
+        - name: 安装脚本语法
+          script: "bash -n scripts/install-linux.sh scripts/uninstall-linux.sh"
+        - name: 安装冒烟测试
+          script: "bash scripts/install-linux.sh && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json set ip_check_mode http && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json add-ip 203.0.113.10"
+    - docker:
+        image: python:3.12
+      services:
+        - docker
+      stages:
+        - name: 安装 Linux GUI 与网络工具
+          script: "apt-get update && apt-get install -y --no-install-recommends xvfb xauth python3-tk nftables"
+        - name: 安装依赖
+          script: "python -m pip install -r portable/requirements.txt"
+        - name: 测试含 GUI
+          script: "NO_PROXY=* no_proxy=* xvfb-run -a python -m unittest discover -s tests -v"
+        - name: 安装脚本语法
+          script: "bash -n scripts/install-linux.sh scripts/uninstall-linux.sh"
+        - name: 安装冒烟测试
+          script: "bash scripts/install-linux.sh && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json set ip_check_mode http && \"$HOME/.local/bin/claudeguard\" --config /tmp/installed-config.json add-ip 203.0.113.10"
+        - name: 隔离容器内核网络测试
+          script: "docker run --rm --privileged -v \"$PWD:/workspace\" -w /workspace python:3.12 bash -c 'apt-get update -qq && apt-get install -y --no-install-recommends nftables && python tests/integration/linux_network.py'"
