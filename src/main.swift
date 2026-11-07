@@ -1256,9 +1256,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsMenu.addItem(.separator())
         let firewallItem = NSMenuItem(title: "Claude 直连防火墙", action: nil, keyEquivalent: "")
         let firewallMenu = NSMenu()
-        for (title, action) in [("查看安装状态", "status"), ("查看规则范围", "preview"),
+        for (title, action) in [("查看安装状态", "status"), ("了解拦截范围…", "preview"),
                                 ("安装直连防火墙…", "install"), ("卸载直连防火墙…", "uninstall"),
-                                ("检查实际 PF 状态…", "verify")] {
+                                ("检查当前是否生效…", "verify")] {
             let item = NSMenuItem(title: title, action: #selector(onFirewallAction(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = action
@@ -1354,6 +1354,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         runToolCommand(["firewall", action], tool: "claudeguard", title: "Claude 直连防火墙")
     }
 
+    func firewallPreviewAlert(output: String, succeeded: Bool, details: Bool = false) -> NSAlert {
+        let alert = NSAlert()
+        alert.addButton(withTitle: "关闭")
+        if succeeded && !details {
+            alert.messageText = "Claude 直连拦截说明"
+            alert.informativeText = """
+            拦什么？
+            不经过代理、直接连接到名单内 Claude 地址的流量。
+
+            怎么用？
+            先打开并配置好代理，再使用 Claude。经代理服务器中转的路径保留；本功能不会自动配置代理。
+
+            退出后还会拦吗？
+            会。已安装的规则会保留，卸载此防火墙才会移除。
+
+            怎样确认已生效？
+            这是范围预览。请到菜单点“检查当前是否生效…”。
+
+            覆盖限制：只拦名单内的网段和网站已查到的 IP，不保证覆盖所有子域名。共用 IP 的其他网站直连也会受限。
+            """
+            alert.addButton(withTitle: "查看技术详情…")
+        } else {
+            alert.messageText = succeeded ? "拦截范围 · 技术详情" : "无法读取拦截范围"
+            alert.informativeText = succeeded ? "供排查问题使用。以下仅为规则预览，不代表已安装或已生效。" : "暂时无法读取拦截范围。请保留下方错误信息以便排查。"
+            alert.alertStyle = succeeded ? .informational : .warning
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 440, height: 240))
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            let text = NSTextView(frame: scroll.contentView.bounds)
+            text.isEditable = false
+            text.isSelectable = true
+            text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            text.textContainerInset = NSSize(width: 8, height: 8)
+            text.isVerticallyResizable = true
+            text.isHorizontallyResizable = false
+            text.autoresizingMask = [.width]
+            text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            text.textContainer?.widthTracksTextView = true
+            text.string = output.isEmpty ? "命令未返回详情。" : output
+            scroll.documentView = text
+            alert.accessoryView = scroll
+        }
+        return alert
+    }
+
     @objc func onWindowCommand() {
         let alert = NSAlert()
         alert.messageText = "Claude-W 窗口管理"
@@ -1389,19 +1434,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             process.standardOutput = output
             process.standardError = output
             let text: String
+            let succeeded: Bool
             do {
                 try process.run()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 text = String(data: data, encoding: .utf8) ?? "无法读取结果"
-            } catch { text = "工具启动失败：\(error.localizedDescription)" }
+                succeeded = process.terminationStatus == 0
+            } catch {
+                text = "工具启动失败：\(error.localizedDescription)"
+                succeeded = false
+            }
             DispatchQueue.main.async {
+                defer { self.settingsBusy = false }
+                if tool == "claudeguard" && args == ["firewall", "preview"] {
+                    let notice = self.firewallPreviewAlert(output: text, succeeded: succeeded)
+                    if notice.runModal() == .alertSecondButtonReturn {
+                        self.firewallPreviewAlert(output: text, succeeded: succeeded, details: true).runModal()
+                    }
+                    return
+                }
                 let notice = NSAlert()
                 notice.messageText = title
                 notice.informativeText = text.isEmpty ? "命令已结束，无输出。" : text
                 notice.addButton(withTitle: "关闭")
                 notice.runModal()
-                self.settingsBusy = false
             }
         }
     }

@@ -55,6 +55,19 @@ native.rebuildMenu()
 let settingsMenu = native.menu.items.first { $0.title == "设置" }!.submenu!
 let firewallMenu = settingsMenu.items.first { $0.title == "Claude 直连防火墙" }!.submenu!
 precondition(firewallMenu.items.compactMap { $0.representedObject as? String } == ["status", "preview", "install", "uninstall", "verify"], "Firewall menu actions are missing or misrouted")
+let rawFirewallRules = "table <claudeguard_direct> persist { 160.79.104.0/21 }\n" + String(repeating: "claude.ai\n", count: 200)
+let firewallPreview = native.firewallPreviewAlert(output: rawFirewallRules, succeeded: true)
+precondition(firewallPreview.informativeText.contains("拦什么？") && firewallPreview.informativeText.contains("怎么用？"))
+precondition(firewallPreview.informativeText.contains("这是范围预览") && !firewallPreview.informativeText.contains("table <"), "Preview exposed raw rules or claimed live enforcement")
+precondition(firewallPreview.buttons.count == 2 && firewallPreview.accessoryView == nil)
+let firewallDetails = native.firewallPreviewAlert(output: rawFirewallRules, succeeded: true, details: true)
+let firewallScroll = firewallDetails.accessoryView as! NSScrollView
+let firewallText = firewallScroll.documentView as! NSTextView
+precondition(firewallScroll.frame.height == 240 && firewallScroll.hasVerticalScroller)
+precondition(firewallText.string == rawFirewallRules && !firewallText.isEditable && firewallText.isSelectable, "Technical details were truncated or editable")
+let firewallFailure = native.firewallPreviewAlert(output: "permission denied", succeeded: false)
+precondition(firewallFailure.alertStyle == .warning && firewallFailure.buttons.count == 1)
+precondition(((firewallFailure.accessoryView as! NSScrollView).documentView as! NSTextView).string == "permission denied", "Preview failure hid its actual error")
 native.eventLogPath = URL(fileURLWithPath: CommandLine.arguments[2]).deletingLastPathComponent().appendingPathComponent("events.jsonl").path
 native.logEvent("test_event", fields: ["reason": "测试"])
 let log = try! String(contentsOfFile: native.eventLogPath, encoding: .utf8)
